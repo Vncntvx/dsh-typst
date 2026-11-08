@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "title": "dsh-typst",
+    "description": "DeepSeek Harness 的 Typst 插件:用你本机的 typst 驱动右侧栏实时预览,Agent 可检查错误、查看渲染页面、在预览中标出位置并导出 PDF。",
+    "detail": "docs/plugin-detail.md"
+  },
+  "typstPath": "Typst 路径",
+  "typstPathHint": "可选。typst 可执行文件的完整路径。默认在 PATH 与常见安装位置中查找;只在 Typst 装在其他位置时填写。"
+}

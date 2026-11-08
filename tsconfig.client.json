@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["react"]
+  },
+  "include": [
+    "src/client",
+    "src/contract.ts",
+    "src/constants.ts",
+    "src/wire-schemas.ts"
+  ],
+  "exclude": []
+}

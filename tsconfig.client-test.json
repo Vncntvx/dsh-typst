@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.client.json",
+  "compilerOptions": { "rootDir": ".", "types": ["react", "node"] },
+  "include": ["src/client", "tests/client"],
+  "exclude": []
+}

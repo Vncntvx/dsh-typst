@@ -1,0 +1,6 @@
+# Development composition: mount this plugin into a local harness checkout.
+# Copy to dev.cordis.yml and edit the path; never commit dev.cordis.yml.
+- insert:
+    - id: typst
+      name: /absolute/path/to/dsh-typst
+      config: {}

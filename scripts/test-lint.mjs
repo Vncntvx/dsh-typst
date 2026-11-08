@@ -1,0 +1,537 @@
+/**
+ * The test suite's mechanical guards: the rules that decay silently, checked
+ * the way a reviewer cannot check them by hand across the whole spec tree.
+ *
+ * Every check here exists because a failure it catches is invisible in a diff
+ * and invisible to a failing test. A spec that carries a raw NUL byte inside a
+ * string literal reads as binary to every text tool: the Read tool refuses it,
+ * `grep` skips it without `-a`, and `file(1)` reports `data`. A spec that
+ * grows a review round at a time stops being reviewable long before it stops
+ * passing. A spec that imports an upstream package's unpublished `src/` tree
+ * resolves in a sibling checkout and fails in a registry-only install, which
+ * is the shape of a bug that only appears on someone else's machine. None of
+ * those were visible in a diff, and none of them failed a test.
+ *
+ * The size and lane limits are **ratchets**: they are set from the values the
+ * suite carries at the time and only ever move down. A ratchet that never
+ * tightens is a comment; one that tightens by itself would fail on the next
+ * unrelated commit, so the numbers are reviewed here.
+ *
+ * The pure predicates below are exported and driven by `tests/unit/test-lint.spec.ts`
+ * so the guards themselves cannot decay: a regex that stopped matching the
+ * form its docstring names would otherwise fail the suite green.
+ * @module scripts/test-lint
+ */
+
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Directories that carry the project's source, tests, tooling, prose, and locale copy. */
+export const TEXT_ROOTS = ["src", "tests", "scripts", "docs", "locale"];
+
+/**
+ * The extensions that contract to be text. Binary assets are not the target
+ * of this check and never were: a `.png` under `docs/images/` is supposed to
+ * hold arbitrary bytes, while a `.ts` file holding them is the corruption this
+ * guard exists to catch. `.mts`/`.cts` are contract text like every other
+ * TypeScript flavor: the build gates read them.
+ */
+export const TEXT_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".json",
+  ".md",
+  ".css",
+  ".yml",
+  ".yaml",
+  ".html",
+  ".svg",
+  ".txt",
+];
+
+/**
+ * Extensions allowed to hold arbitrary bytes under the text roots. A new
+ * extension that is neither listed here nor in {@link TEXT_EXTENSIONS} fails
+ * the guard, so the next binary asset has to be declared rather than silently
+ * skipped.
+ */
+export const BINARY_EXTENSIONS = [".png"];
+
+/**
+ * The control bytes a text file may contain: tab, newline, carriage return.
+ * Anything else is either corruption or an escape someone forgot to write.
+ */
+const ALLOWED_CONTROL = new Set([0x09, 0x0a, 0x0d]);
+
+/**
+ * Ratchet: the most lines one spec file may occupy. Lower it in the same
+ * commit that splits a file, never preemptively. The current ceiling is
+ * `tests/workspace/session.spec.ts`; lowering it requires splitting that
+ * spec first.
+ */
+const MAX_SPEC_LINES = 210;
+
+/**
+ * Ratchet: the most lines one helper may occupy. Existing helpers above the
+ * limit are frozen in {@link HELPER_SIZE_BASELINE}; a baselined file may only
+ * shrink, and a new helper may never enter the baseline.
+ */
+const MAX_HELPER_LINES = 300;
+
+/**
+ * Grandfathered helpers at their pre-change size. Removing a file or splitting
+ * it means deleting or lowering its entry in the same commit; adding an entry
+ * is never allowed.
+ */
+const HELPER_SIZE_BASELINE = Object.freeze({});
+
+/**
+ * Ratchet: the directories a spec may live in, relative to `tests/`. Each lane
+ * mirrors the `src/` layer it covers, so where a spec lives is decided by what
+ * it tests rather than by when it was written. Nested lanes such as
+ * `client/sources` are covered by their first segment.
+ */
+const SPEC_LANES = [
+  "unit",
+  "typst",
+  "workspace",
+  "tools",
+  "skills",
+  "host",
+  "client",
+];
+
+const failures = [];
+
+/**
+ * Every file under one directory, recursively, as absolute paths. Dot-entries
+ * are skipped: `.DS_Store` and its kin are OS state that a checkout carries
+ * but the repository does not, and a guard that fires on them trains its
+ * reader to ignore it.
+ */
+function filesUnder(dir) {
+  const found = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry.startsWith(".")) continue;
+    const path = join(dir, entry);
+    if (statSync(path).isDirectory()) found.push(...filesUnder(path));
+    else found.push(path);
+  }
+  return found;
+}
+
+/** The line count of one file, without counting the newline that ends the last line. */
+function lineCountOf(path) {
+  const text = readFileSync(path, "utf8");
+  return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+}
+
+/** File paths of every spec, as paths relative to the repo root. */
+function specFiles() {
+  return filesUnder(join(root, "tests"))
+    .filter((path) => /\.spec\.tsx?$/.test(path))
+    .map((path) => relative(root, path))
+    .sort();
+}
+
+/** File paths of every helper under a `helpers/` directory, relative to the repo root. */
+function helperFiles() {
+  return filesUnder(join(root, "tests"))
+    .filter((path) => /[\\/]helpers[\\/]/.test(path) && /\.tsx?$/.test(path))
+    .map((path) => relative(root, path))
+    .sort();
+}
+
+/**
+ * A file must read as text end to end. The byte offset and a short context
+ * are named because the offending byte is invisible in every editor view.
+ */
+function checkTextFiles() {
+  for (const dir of TEXT_ROOTS) {
+    for (const path of filesUnder(join(root, dir))) {
+      if (!TEXT_EXTENSIONS.some((extension) => path.endsWith(extension)))
+        continue;
+      const bytes = readFileSync(path);
+      const found = new Map();
+      for (const [index, byte] of bytes.entries()) {
+        if (byte < 0x20 && !ALLOWED_CONTROL.has(byte)) {
+          found.set(byte, [...(found.get(byte) ?? []), index]);
+        }
+      }
+      for (const [byte, offsets] of found) {
+        const context = bytes
+          .subarray(Math.max(0, offsets[0] - 40), offsets[0] + 40)
+          .toString("utf8")
+          .replaceAll(
+            /[\u0000-\u001f]/g,
+            (char) => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+          );
+        failures.push(
+          [
+            `${relative(root, path)} contains ${offsets.length} raw 0x${byte.toString(16).padStart(2, "0")} byte(s)`,
+            `  first at offset ${offsets[0]}: …${context}…`,
+            `  fix: write the escape (\\u0000) instead of the byte, so the file stays text`,
+          ].join("\n"),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Every extension occurring under the text roots must be either a declared
+ * text extension or a declared binary one. A file type that is neither would
+ * otherwise be skipped by the control-byte guard without anyone deciding it
+ * should be.
+ */
+export function unscannedExtensionsOf(paths) {
+  const declared = new Set([...TEXT_EXTENSIONS, ...BINARY_EXTENSIONS]);
+  const unscanned = new Set();
+  for (const path of paths) {
+    const dot = path.lastIndexOf(".");
+    if (dot === -1) continue;
+    const extension = path.slice(dot);
+    if (!declared.has(extension)) unscanned.add(extension);
+  }
+  return [...unscanned].sort();
+}
+
+function checkExtensionCoverage() {
+  const paths = TEXT_ROOTS.flatMap((dir) => filesUnder(join(root, dir)));
+  const unscanned = unscannedExtensionsOf(paths);
+  for (const extension of unscanned) {
+    failures.push(
+      [
+        `files under ${TEXT_ROOTS.join("/")} carry the "${extension}" extension, which is neither a declared text nor binary extension`,
+        `  fix: add it to TEXT_EXTENSIONS (text, scanned for control bytes) or BINARY_EXTENSIONS (declared, skipped)`,
+      ].join("\n"),
+    );
+  }
+}
+
+/** No spec may outgrow the ratchet; the offenders are listed largest first. */
+function checkSpecSize() {
+  const sized = specFiles().map((path) => ({
+    path,
+    lines: lineCountOf(join(root, path)),
+  }));
+  for (const { path, lines } of sized.filter(
+    (entry) => entry.lines > MAX_SPEC_LINES,
+  )) {
+    failures.push(
+      [
+        `${path} is ${lines} lines; the ratchet allows ${MAX_SPEC_LINES}`,
+        `  fix: split it along its own seams and lower the ratchet in the same commit`,
+      ].join("\n"),
+    );
+  }
+  const largest = sized.slice().sort((a, b) => b.lines - a.lines)[0];
+  return largest === undefined
+    ? "(none)"
+    : `${largest.path} (${largest.lines} lines)`;
+}
+
+/**
+ * Compare helper sizes against the limit and the frozen baseline.
+ *
+ * A baselined helper may shrink but never grow; a helper outside the baseline
+ * may not exceed the limit; a baseline entry whose file disappeared is stale
+ * and must be removed with the split.
+ * @param entries - `{ path, lines }` for every helper.
+ * @param baseline - frozen path → line count.
+ * @param limit - the new-helper limit.
+ * @returns violations with the kind, path, actual lines, and applicable limit.
+ */
+export function helperSizeViolations(
+  entries,
+  baseline = HELPER_SIZE_BASELINE,
+  limit = MAX_HELPER_LINES,
+) {
+  const found = [];
+  const seen = new Set();
+  for (const { path, lines } of entries) {
+    const frozen = baseline[path];
+    if (frozen !== undefined) {
+      seen.add(path);
+      if (lines > frozen)
+        found.push({ kind: "grown", path, lines, limit: frozen });
+      continue;
+    }
+    if (lines > limit) found.push({ kind: "new", path, lines, limit });
+  }
+  for (const path of Object.keys(baseline)) {
+    if (!seen.has(path))
+      found.push({ kind: "stale", path, lines: 0, limit: baseline[path] });
+  }
+  return found;
+}
+
+/** No helper may outgrow its baseline or the new-helper limit. */
+function checkHelperSize() {
+  const entries = helperFiles().map((path) => ({
+    path,
+    lines: lineCountOf(join(root, path)),
+  }));
+  for (const violation of helperSizeViolations(entries)) {
+    if (violation.kind === "grown") {
+      failures.push(
+        [
+          `${violation.path} is ${violation.lines} lines; its frozen baseline is ${violation.limit}`,
+          `  fix: split it and lower the baseline in the same commit`,
+        ].join("\n"),
+      );
+    } else if (violation.kind === "stale") {
+      failures.push(
+        [
+          `${violation.path} is in the helper-size baseline but no longer exists`,
+          `  fix: remove its baseline entry in the same commit that removed or renamed it`,
+        ].join("\n"),
+      );
+    } else {
+      failures.push(
+        [
+          `${violation.path} is ${violation.lines} lines; new helpers are limited to ${violation.limit}`,
+          `  fix: move the seam into module support instead of growing the helper`,
+        ].join("\n"),
+      );
+    }
+  }
+  return `${entries.length} helpers`;
+}
+
+/** A spec's location is decided by the module it tests, so only lanes are allowed. */
+function checkLanes() {
+  for (const path of specFiles()) {
+    const lane = relative(join(root, "tests"), join(root, path)).split("/")[0];
+    const segment =
+      lane.endsWith(".spec.ts") || lane.endsWith(".spec.tsx") ? "" : lane;
+    if (!SPEC_LANES.includes(segment)) {
+      failures.push(
+        [
+          `${path} sits in a directory no lane declares ("tests/${segment || "."}")`,
+          `  lanes: ${SPEC_LANES.map((name) => name || ".").join(", ")}`,
+          `  fix: move it under the lane that mirrors the src module it tests`,
+        ].join("\n"),
+      );
+    }
+  }
+}
+
+/**
+ * Blank out comments and string/template bodies while preserving every
+ * character's offset, so match positions in the stripped text still map to
+ * real line numbers.
+ *
+ * Regex literals are deliberately not stripped: telling a division from a
+ * regex needs a full lexer, a mistake there would blank real code (hiding a
+ * violation), and a regex body containing `.only(`/`.skip(` does not occur in
+ * this suite.
+ *
+ * `blankStrings = false` keeps string bodies intact. The upstream-source
+ * import guard needs both readings: comments removed so a documented example
+ * does not count as a dependency, and string bodies still present so the
+ * module specifier can be named. Comparing the two readings at each match
+ * position is what distinguishes a real import from a string fixture.
+ * @param source - the file content.
+ * @param blankStrings - whether to blank string and template bodies too.
+ * @returns same-length text with comments (and optionally strings) blanked.
+ */
+export function stripCommentsAndStrings(source, blankStrings = true) {
+  const out = source.split("");
+  const n = source.length;
+  let i = 0;
+  while (i < n) {
+    const ch = source[i];
+    const next = i + 1 < n ? source[i + 1] : "";
+    if (ch === "/" && next === "/") {
+      while (i < n && source[i] !== "\n") {
+        out[i] = " ";
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      out[i] = " ";
+      out[i + 1] = " ";
+      i += 2;
+      while (i < n) {
+        if (source[i] === "*" && source[i + 1] === "/") {
+          out[i] = " ";
+          out[i + 1] = " ";
+          i += 2;
+          break;
+        }
+        if (source[i] !== "\n") out[i] = " ";
+        i += 1;
+      }
+      continue;
+    }
+    if (blankStrings && (ch === '"' || ch === "'" || ch === "`")) {
+      const quote = ch;
+      i += 1;
+      while (i < n) {
+        if (source[i] === "\\") {
+          out[i] = " ";
+          if (source[i + 1] !== undefined && source[i + 1] !== "\n")
+            out[i + 1] = " ";
+          i += 2;
+          continue;
+        }
+        if (source[i] === quote) {
+          out[i] = " ";
+          i += 1;
+          break;
+        }
+        if (source[i] !== "\n") out[i] = " ";
+        i += 1;
+      }
+      continue;
+    }
+    i += 1;
+  }
+  return out.join("");
+}
+
+/**
+ * A focused or disabled test is a decision that outlives its author: `.only`
+ * silently removes every other case from the run, and `.skip`/`.todo` turn a
+ * red test into a green suite. The chain forms count too (`it.only.each`,
+ * `it.concurrent.only`, and a `.only` continued on the next line all focus or
+ * disable just as hard), so the scan runs over comment- and string-stripped
+ * content with a chain-aware pattern rather than one line at a time.
+ *
+ * `runIf` stays the sanctioned gate. Its unconditional-disable spelling,
+ * `runIf(false)`, is refused exactly like `skipIf(true)`: a conditional gate
+ * is the author's call, an unconditional one is a hidden decision.
+ * @param source - the file content.
+ * @returns each violation with its 1-based line and the construct named.
+ */
+export function focusViolationsOf(source) {
+  const stripped = stripCommentsAndStrings(source);
+  const violations = [];
+  const chain =
+    /\b(it|test|describe|suite)((?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\.\s*(only|skip|todo)\b/g;
+  for (const match of stripped.matchAll(chain)) {
+    violations.push({
+      line: stripped.slice(0, match.index).split("\n").length,
+      construct: `${match[1]}${match[2].replaceAll(/\s+/g, "")}.${match[3]}`,
+    });
+  }
+  const conditional =
+    /\b(?:it|test|describe|suite)\s*\.\s*(skipIf|runIf)\s*\(\s*(true|false)\b/g;
+  for (const match of stripped.matchAll(conditional)) {
+    if (
+      (match[1] === "skipIf" && match[2] === "true") ||
+      (match[1] === "runIf" && match[2] === "false")
+    ) {
+      violations.push({
+        line: stripped.slice(0, match.index).split("\n").length,
+        construct: `${match[1]}(${match[2]})`,
+      });
+    }
+  }
+  return violations.sort((a, b) => a.line - b.line);
+}
+
+function checkFocus() {
+  for (const path of specFiles()) {
+    for (const violation of focusViolationsOf(
+      readFileSync(join(root, path), "utf8"),
+    )) {
+      failures.push(
+        [
+          `${path}:${violation.line} uses ${violation.construct}`,
+          `  fix: delete the case or gate its suite with .runIf(...)`,
+        ].join("\n"),
+      );
+    }
+  }
+}
+
+/**
+ * The published `@deepseek-ai/*` packages advertise `"./src/*": "./src/*"` in
+ * `exports` while `files` ships only `lib/**` and `locale/*.json`. An import
+ * into that subtree resolves in a sibling checkout (where this workspace
+ * links `node_modules` to source) and fails both typecheck and Vite
+ * resolution in the registry-only client lane CI runs. `src/**` and
+ * `tests/**` must depend on public entries only.
+ *
+ * Only import syntax counts: `tests/unit/harness-state.spec.ts` legitimately
+ * carries `/src/` specifiers inside string fixtures for its own artifact
+ * audit. A commented-out example is not a dependency either. Comparing a
+ * comment-only stripping with the full comment-and-string blanking at the
+ * match position is what keeps those two cases out of the result.
+ *
+ * Regex literals are not stripped (see {@link stripCommentsAndStrings}); a
+ * regex containing a fake import specifier would be reported, and no such
+ * literal exists in this suite.
+ * @param source - the file content.
+ * @returns each offending import with its 1-based line and module specifier.
+ */
+const UPSTREAM_SOURCE_IMPORT =
+  /\b(?:from|import|require)\s*\(?\s*['"](@deepseek-ai\/[a-z0-9-]+\/src\/[^'"\n]+)['"]/g;
+
+export function upstreamSourceImportsOf(source) {
+  const noComments = stripCommentsAndStrings(source, false);
+  const codeOnly = stripCommentsAndStrings(source);
+  const found = [];
+  for (const match of noComments.matchAll(UPSTREAM_SOURCE_IMPORT)) {
+    if (codeOnly[match.index] === " ") continue;
+    found.push({
+      line: noComments.slice(0, match.index).split("\n").length,
+      specifier: match[1],
+    });
+  }
+  return found;
+}
+
+/** No source or spec may import an upstream package's unpublished source tree. */
+function checkUpstreamSourceImports() {
+  const sourceFile = /\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/;
+  for (const dir of ["src", "tests"]) {
+    for (const path of filesUnder(join(root, dir))) {
+      if (!sourceFile.test(path)) continue;
+      const source = readFileSync(path, "utf8");
+      for (const violation of upstreamSourceImportsOf(source)) {
+        failures.push(
+          [
+            `${relative(root, path)}:${violation.line} imports ${violation.specifier}`,
+            `  fix: use the package's public entry, or declare the contract locally; the published tarball ships no src tree`,
+          ].join("\n"),
+        );
+      }
+    }
+  }
+}
+
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  const largest = checkSpecSize();
+  const helpers = checkHelperSize();
+  checkTextFiles();
+  checkExtensionCoverage();
+  checkLanes();
+  checkFocus();
+  checkUpstreamSourceImports();
+
+  if (failures.length > 0) {
+    process.stderr.write(`test-lint: ${failures.length} problem(s)\n\n`);
+    for (const failure of failures) process.stderr.write(`${failure}\n\n`);
+    process.exit(1);
+  }
+
+  process.stdout.write(
+    `test-lint: ok — ${specFiles().length} specs, largest ${largest}, ${helpers}, lane ratchet ${SPEC_LANES.map((name) => name || ".").join("/")}\n`,
+  );
+}

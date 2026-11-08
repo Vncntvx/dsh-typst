@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "title": "dsh-typst",
+    "description": "Typst plugin for DeepSeek Harness: a live preview right-sidebar panel driven by the user's own typst, with agent tools that check errors, look at rendered pages, point at places in the preview, and export PDFs.",
+    "detail": "docs/plugin-detail.en.md"
+  },
+  "typstPath": "Typst path",
+  "typstPathHint": "Optional. Full path of the typst executable. By default it is looked up on PATH and in common install locations; set it only when Typst is installed elsewhere."
+}
