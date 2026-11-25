@@ -45,7 +45,7 @@ dsh-typst brings your local Typst installation into DeepSeek Harness. The agent 
 In DeepSeek Harness, open **Plugins** in the sidebar, click **Add plugin**, and enter one of:
 
 - Latest (recommended): `dsh-typst-plugin`
-- A specific version: `dsh-typst-plugin@0.1.0-alpha.0`
+- A specific version: `dsh-typst-plugin@0.1.0`
 - GitHub prebuilt branch: `github:Vncntvx/dsh-typst#release`
 
 ### Command line

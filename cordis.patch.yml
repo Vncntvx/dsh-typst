@@ -2,5 +2,5 @@
 # The `name` refers to the package name, so Node module resolution can find it.
 - insert:
     - id: typst
-      name: dsh-typst
+      name: dsh-typst-plugin
       config: {}

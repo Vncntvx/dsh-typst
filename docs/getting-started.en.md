@@ -19,7 +19,7 @@ The plugin looks for typst in this order: the path in the plugin settings → PA
 Open **Plugins** in the sidebar of the DeepSeek Harness desktop app, click **Add plugin**, and enter one of these identifiers:
 
 - Latest release (recommended): `dsh-typst-plugin`
-- A specific version: `dsh-typst-plugin@0.1.0-alpha.0`
+- A specific version: `dsh-typst-plugin@0.1.0`
 - The GitHub prebuilt branch: `github:Vncntvx/dsh-typst#release`
 
 ### Command-line installation

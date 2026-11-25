@@ -1,4 +1,4 @@
-/** Type surface for the harness-state CLI's pure helpers (unit-tested). */
+/** Type surface for the harness-state CLI's pure helpers. */
 
 /**
  * Rewrite every harness face of a manifest to the pin (mutates `manifest`).
@@ -105,6 +105,9 @@ export interface ArtifactProblems {
 export declare function collectVendorProblems(
   harnessRoot: string,
   manifest: Record<string, unknown>,
+  packages?: Map<string, string>,
+  pin?: string,
+  versionOf?: (dir: string) => string | undefined,
 ): string[];
 
 /**

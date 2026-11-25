@@ -19,7 +19,7 @@ dsh-typst 将 Typst 实时预览接入 DeepSeek Harness 的右侧边栏。Agent 
 在 DeepSeek Harness 桌面端打开侧栏的**插件**，点击**添加插件**，输入对应标识：
 
 - 最新版（推荐）：`dsh-typst-plugin`
-- 指定版本：`dsh-typst-plugin@0.1.0-alpha.0`
+- 指定版本：`dsh-typst-plugin@0.1.0`
 - GitHub 预构建分支：`github:Vncntvx/dsh-typst#release`
 
 ### 命令行安装

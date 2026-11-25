@@ -52,13 +52,19 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { minVersion, satisfies, validRange } from "semver";
+import { gt, lt, minVersion, satisfies, validRange } from "semver";
 import {
   collectHarnessPackages,
   resolveHarnessRoot,
 } from "./shared/harness-packages.mjs";
+import {
+  GENERATED_REMOTE,
+  INLINE_SAFE,
+  VENDORED_LIBRARY,
+} from "./client-graph-authority.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const harnessRoot = resolveHarnessRoot(root);
@@ -413,8 +419,50 @@ function checkPin(manifest, packages) {
     );
   }
   checkLock(pin, manifest);
+  checkResolvedVersions(pin, manifest);
   checkOverrideNames(manifest, packages);
   return pin;
+}
+
+/**
+ * Compare the version actually resolved under `node_modules` with the pin.
+ * A copy older than the pin means the install is stale and the contract the
+ * types were written against is not the one running. A copy newer than the pin
+ * is the documented local-sibling workflow (`link:local-harness`) and is
+ * reported as a note, not a failure. Missing packages are skipped: a partial
+ * install is caught by the lock check and the build itself.
+ * @param pin - the exact harness version package.json declares.
+ * @param manifest - parsed package.json.
+ */
+function checkResolvedVersions(pin, manifest) {
+  const names = new Set();
+  for (const section of VERSION_SECTIONS) {
+    for (const name of Object.keys(manifest[section] ?? {})) {
+      if (isDshPackage(name)) names.add(name);
+    }
+  }
+  for (const name of names) {
+    let version;
+    try {
+      version = readJson(
+        join(root, "node_modules", ...name.split("/"), "package.json"),
+      ).version;
+    } catch {
+      continue;
+    }
+    if (typeof version !== "string" || !VERSION_PATTERN.test(version)) continue;
+    if (lt(version, pin)) {
+      problems.push(
+        `node_modules resolves ${name}@${version}, older than the pin ${pin};` +
+          " run npm install (or npm run link:local-harness)",
+      );
+    } else if (gt(version, pin)) {
+      notes.push(
+        `${name}@${version} resolves ahead of the pin ${pin}` +
+          " (local sibling checkout; pin it once the registry publishes it)",
+      );
+    }
+  }
 }
 
 /**
@@ -446,6 +494,60 @@ function siblingVersion(dir) {
     return typeof version === "string" ? version : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * The version a vendored package carries at the pinned tag, not at whatever
+ * the sibling worktree happens to check out. Local development routinely runs
+ * a sibling ahead of the pin; reading its working tree would report every
+ * independently-versioned vendor package as a mismatch against a release it
+ * is not part of.
+ * @param harnessRoot - the sibling harness checkout root.
+ * @param pin - the exact harness version, or undefined when the manifest has no pin.
+ * @param dir - the package directory inside the sibling checkout.
+ * @returns the tag's declared version, or undefined when the tag or file is absent.
+ */
+function pinnedVendorVersion(harnessRoot, pin, dir) {
+  if (pin === undefined) return undefined;
+  const relativeDir = relative(harnessRoot, dir).split(sep).join("/");
+  try {
+    const manifest = JSON.parse(
+      execFileSync(
+        "git",
+        ["-C", harnessRoot, "show", `dsh-v${pin}:${relativeDir}/package.json`],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      ),
+    );
+    return typeof manifest.version === "string" ? manifest.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the sibling checkout's HEAD is exactly the pinned tag. Freshness
+ * compares the checkout's source against its own generated declarations, so it
+ * is meaningful only when the checkout *is* the pin; a sibling ahead of the pin
+ * would otherwise fail every local gate for changes the release does not use.
+ * @param harnessRoot - the sibling harness checkout root.
+ * @param pin - the exact harness version.
+ * @returns true when HEAD resolves to the pinned tag.
+ */
+function siblingAtPin(harnessRoot, pin) {
+  try {
+    const head = execFileSync("git", ["-C", harnessRoot, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const tagged = execFileSync(
+      "git",
+      ["-C", harnessRoot, "rev-parse", "--verify", `dsh-v${pin}^{commit}`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return head === tagged;
+  } catch {
+    return false;
   }
 }
 
@@ -506,9 +608,17 @@ function overriddenVendorProblem(name) {
  * @param harnessRoot - the sibling harness checkout root.
  * @param manifest - parsed package.json.
  * @param packages - optional pre-collected harness package map.
+ * @param pin - the exact harness version whose tag is the comparison source.
+ * @param versionOf - optional version lookup, for tests that cannot run git.
  * @returns human-readable problems; empty when every vendored dependency agrees.
  */
-export function collectVendorProblems(harnessRoot, manifest, packages) {
+export function collectVendorProblems(
+  harnessRoot,
+  manifest,
+  packages,
+  pin,
+  versionOf = (dir) => pinnedVendorVersion(harnessRoot, pin, dir),
+) {
   const found = [];
   if (!existsSync(harnessRoot)) return found;
   const resolvedPackages = packages ?? collectHarnessPackages(harnessRoot);
@@ -518,7 +628,7 @@ export function collectVendorProblems(harnessRoot, manifest, packages) {
       if (!name.startsWith("@deepseek-ai/") || isDshPackage(name)) continue;
       const dir = resolvedPackages.get(name);
       if (dir === undefined || !isVendoredPackage(harnessRoot, dir)) continue;
-      const installed = siblingVersion(dir);
+      const installed = versionOf(dir);
       if (installed === undefined) continue;
       const floor = validRange(range) === null ? null : minVersion(range);
       if (floor === null) {
@@ -575,7 +685,7 @@ function checkOverrideNames(manifest, packages) {
 /** Collect every `@deepseek-ai/*` specifier this repo imports. */
 function importedSpecifiers() {
   const specifiers = new Set();
-  const pattern = /(?:from|import)\s*\(?\s*'(@deepseek-ai\/[^']+)'/g;
+  const pattern = /(?:from|import)\s*\(?\s*['"](@deepseek-ai\/[^'"]+)['"]/g;
   const walk = (dir) => {
     let entries;
     try {
@@ -746,17 +856,25 @@ export function collectArtifactProblems(harnessRoot, specifiers, packages) {
  * Missing declarations are always a failure (typecheck cannot resolve them);
  * stale ones fail only under `--strict`: a stale sibling build weakens the
  * guarantee without blocking day-to-day work, and the release path is where the
- * guarantee has to hold.
+ * guarantee has to hold. Freshness is meaningful only when the sibling is at
+ * the pin; a sibling ahead of the pin is a local-development checkout, so its
+ * generated declarations are deliberately not compared.
  * @param strict - treat stale artifacts as a failure.
  * @param packages - optional pre-collected harness package map.
+ * @param pin - the exact harness version; undefined when the manifest has no pin.
  */
-function checkArtifacts(strict, packages) {
+function checkArtifacts(strict, packages, pin) {
   if (!existsSync(harnessRoot)) {
     notes.push(
       "sibling harness absent: upstream types come from the installed packages as-is",
     );
     return;
   }
+  const atPin = pin !== undefined && siblingAtPin(harnessRoot, pin);
+  if (pin !== undefined && !atPin)
+    notes.push(
+      `sibling harness HEAD is not dsh-v${pin}; skipping artifact freshness against a different checkout`,
+    );
   const { stale, staleRuntime, missing, outside } = collectArtifactProblems(
     harnessRoot,
     importedSpecifiers(),
@@ -768,7 +886,7 @@ function checkArtifacts(strict, packages) {
         " — run: npm run link:local-harness, then build the sibling harness",
     );
   }
-  if (stale.length > 0) {
+  if (stale.length > 0 && atPin) {
     const detail =
       `${stale.length} imported upstream package(s) have src newer than their built declarations` +
       ` (${stale.join(", ")}); typecheck resolves the older declarations` +
@@ -776,7 +894,7 @@ function checkArtifacts(strict, packages) {
     if (strict) problems.push(detail);
     else notes.push(detail);
   }
-  if (staleRuntime.length > 0) {
+  if (staleRuntime.length > 0 && atPin) {
     const detail =
       `${staleRuntime.length} imported upstream package(s) have a browser runtime older than their` +
       ` client declarations (${staleRuntime.map((entry) => `${entry.name} -> ${entry.runtime}`).join(", ")});` +
@@ -837,6 +955,64 @@ function report() {
   }
 }
 
+/**
+ * The client-graph inline-safety table is a verbatim mirror of the harness
+ * preset. A local edit that drifts from the pin would make the build admit a
+ * module the shell treats as a shared singleton, so compare the three regexes
+ * against the pinned tag rather than trusting the comment above them.
+ * @param pin - the pinned harness version.
+ * @returns human-readable problems; empty when the tag is unavailable.
+ */
+function collectInlineSafetyProblems(pin) {
+  if (!existsSync(harnessRoot) || pin === undefined) return [];
+  let source;
+  try {
+    source = execFileSync(
+      "git",
+      [
+        "-C",
+        harnessRoot,
+        "show",
+        `dsh-v${pin}:packages/client/tsdown.client.ts`,
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+  } catch {
+    return [];
+  }
+  const problems = [];
+  for (const [name, local] of [
+    ["INLINE_SAFE", INLINE_SAFE],
+    ["GENERATED_REMOTE", GENERATED_REMOTE],
+    ["VENDORED_LIBRARY", VENDORED_LIBRARY],
+  ]) {
+    const line = source
+      .split("\n")
+      .find((entry) => entry.includes(`const ${name} =`));
+    if (line === undefined) {
+      problems.push(
+        `${name} is missing from the pinned harness client preset; the local mirror cannot be checked`,
+      );
+      continue;
+    }
+    const start = line.indexOf("/");
+    const end = line.lastIndexOf("/");
+    if (start === -1 || end <= start) {
+      problems.push(
+        `${name} could not be parsed from the pinned harness preset`,
+      );
+      continue;
+    }
+    const upstream = new RegExp(line.slice(start + 1, end)).source;
+    if (upstream !== local.source) {
+      problems.push(
+        `${name} drifted from dsh-v${pin}; mirror packages/client/tsdown.client.ts`,
+      );
+    }
+  }
+  return problems;
+}
+
 /** Check every fact and report; the success banner prints only a resolved pin. */
 function runCheck(strict) {
   const manifest = readJson(pkgPath);
@@ -848,8 +1024,9 @@ function runCheck(strict) {
   // face covers them. A mismatch loads a second Cordis instance into the
   // profile, which is a hard failure in both modes: unlike a stale sibling
   // build, there is nothing here that only the release path has to prove.
-  problems.push(...collectVendorProblems(harnessRoot, manifest, packages));
-  checkArtifacts(strict, packages);
+  problems.push(...collectVendorProblems(harnessRoot, manifest, packages, pin));
+  problems.push(...collectInlineSafetyProblems(pin));
+  checkArtifacts(strict, packages, pin);
   report();
   if (problems.length === 0) console.log(`harness state ok: pin ${pin}`);
   return pin;
