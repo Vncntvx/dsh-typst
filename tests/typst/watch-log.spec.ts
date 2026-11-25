@@ -48,6 +48,27 @@ describe("parseDiagnostics", () => {
     expect(diagnostics[0].hints).toEqual(["variables start with #"]);
   });
 
+  it("parses typst's while-calling trace lines", () => {
+    const text = [
+      "error: unknown variable: foo",
+      "  ┌─ main.typ:2:11",
+      "  while calling `f` at main.typ:1:1",
+      "  while including `chapters/intro.typ` at main.typ:3:1",
+    ].join("\n");
+    const diagnostics = parseDiagnostics(text);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].trace).toEqual([
+      {
+        message: "while calling `f`",
+        location: { file: "main.typ", line: 1, column: 1 },
+      },
+      {
+        message: "while including `chapters/intro.typ`",
+        location: { file: "main.typ", line: 3, column: 1 },
+      },
+    ]);
+  });
+
   it("maps printed paths through toFile and strips ANSI", () => {
     const text = "\u001b[1merror\u001b[0m: broken\n  ┌─ /abs/other.typ:1:1\n";
     const diagnostics = parseDiagnostics(text, (path) =>
@@ -73,6 +94,18 @@ describe("WatchLog", () => {
     expect(events).toEqual([{ kind: "compiling" }]);
     log.finalize();
     expect(events.at(-1)).toMatchObject({ kind: "finished", outcome: "error" });
+  });
+
+  it("finalizes a warning round on a blank line between blocks", () => {
+    const events: unknown[] = [];
+    const log = new WatchLog((event) => events.push(event));
+    log.feed("compiled with warnings in 3ms\n");
+    log.feed("warning: one\n  ┌─ main.typ:1:1\n");
+    log.feed("\n");
+    expect(events.at(-1)).toMatchObject({
+      kind: "finished",
+      outcome: "warnings",
+    });
   });
 
   it("finalizes an ok round immediately", () => {

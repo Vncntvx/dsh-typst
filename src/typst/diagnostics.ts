@@ -16,6 +16,9 @@ const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
 const HEADER = /^(error|warning|help)(?:\[[^\]]*\])?: (.*)$/;
 const LOCATION = /^\s*[┌╭]─+\s*(.+):(\d+):(\d+)\s*$/;
 const NOTE = /^\s*= (?:(hint|note|help): )?(.*)$/;
+/** typst's source trace line: `  while calling `f` at main.typ:2:11`. */
+const TRACE =
+  /^\s*while (calling|including|importing|exporting) `([^`]*)` at (.+):(\d+):(\d+)\s*$/;
 
 const stripAnsi = (text: string): string => text.replace(ANSI, "");
 
@@ -70,6 +73,20 @@ export function parseDiagnostics(
         line: Number(location[2]),
         column: Number(location[3]),
       };
+      continue;
+    }
+    const trace = TRACE.exec(line);
+    if (trace && current) {
+      const point: DiagnosticPointView = {
+        message: `while ${trace[1]} \`${trace[2]}\``,
+        location: {
+          file: toFile(trace[3]),
+          line: Number(trace[4]),
+          column: Number(trace[5]),
+        },
+      };
+      current.trace.push(point);
+      target = point;
       continue;
     }
     const note = NOTE.exec(line);
@@ -166,6 +183,12 @@ export class WatchLog {
       return;
     }
     if (/^watching\s/.test(trimmed) || /^writing to\s/.test(trimmed)) {
+      this.finalize();
+      return;
+    }
+    if (this.pending && trimmed === "") {
+      // A blank line ends a diagnostic block even when the pipe delivered the
+      // next block after the quiet window.
       this.finalize();
       return;
     }

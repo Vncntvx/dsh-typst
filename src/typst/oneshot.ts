@@ -9,20 +9,22 @@
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { LIMITS } from "../constants.js";
-import { TypstError } from "../errors.js";
+import { TYPST_TIMEOUT, TypstError } from "../errors.js";
 import { parseDiagnostics } from "./diagnostics.js";
-import { run } from "./locate.js";
+import { typstFlags, type TypstFlagOptions } from "./flags.js";
+import type { ProcessRunner } from "./process.js";
 import type { DiagnosticView } from "../contract.js";
 
-export interface OneshotOptions {
+export interface OneshotOptions extends TypstFlagOptions {
   typst: string;
   cwd: string;
-  /** Project sandbox root passed to Typst via `--root`. */
-  root?: string;
-  /** Extra directories searched recursively for fonts via `--font-path`. */
-  fontPaths?: string[];
   main: string;
+  /** The harness subprocess runner shared by the workbench. */
+  process: ProcessRunner;
+  /** Explicit environment entries merged onto the provider's scrubbed base. */
   env?: NodeJS.ProcessEnv;
+  /** Cancellation forwarded to the compile. */
+  signal?: AbortSignal;
   /** Where render scratch directories are created. */
   scratch: string;
   toFile?: (path: string) => string;
@@ -39,24 +41,26 @@ async function compile(
   output: string,
   extra: string[],
 ): Promise<CompileResult> {
-  const rootArgs = options.root ? ["--root", options.root] : [];
-  const fontArgs = (options.fontPaths ?? []).flatMap((dir) => [
-    "--font-path",
-    dir,
-  ]);
-  const result = await run(
-    options.typst,
-    ["compile", options.main, output, ...extra, ...rootArgs, ...fontArgs],
+  const result = await options.process.run(
+    [
+      options.typst,
+      "compile",
+      options.main,
+      output,
+      ...extra,
+      ...typstFlags(options),
+    ],
     {
       cwd: options.cwd,
-      env: options.env,
       timeoutMs: options.timeoutMs ?? LIMITS.oneshotTimeoutMs,
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     },
   );
   if (result.timedOut) {
     throw new TypstError(
       `typst compile did not finish within ${Math.round((options.timeoutMs ?? LIMITS.oneshotTimeoutMs) / 1e3)} s.`,
-      "TYPST_TIMEOUT",
+      TYPST_TIMEOUT,
     );
   }
   const diagnostics = parseDiagnostics(result.stderr, options.toFile);

@@ -13,24 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WorkspaceSession } from "../../src/workspace/session.js";
+import { fakeTypstWrapper, subprocessRuntime } from "./helpers/session.js";
 
 let root: string;
 let dataDir: string;
 let session: WorkspaceSession;
-
-const fakeTypst = new URL("../fixtures/typst-fake.cjs", import.meta.url)
-  .pathname;
-
-/** A wrapper the locator can execute: node running the fake CLI. */
-async function writeFakeWrapper(dir: string): Promise<string> {
-  const wrapper = join(dir, "fake-typst");
-  await writeFile(
-    wrapper,
-    `#!/bin/sh\nexec '${process.execPath}' '${fakeTypst}' "$@"\n`,
-    { mode: 0o755 },
-  );
-  return wrapper;
-}
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "dsh-typst-fragments-"));
@@ -46,10 +33,10 @@ beforeAll(async () => {
   session = new WorkspaceSession({
     workspaceRoot: root,
     dataDir,
+    typstPath: await fakeTypstWrapper(dataDir),
+    subprocess: await subprocessRuntime(),
     log: () => undefined,
   });
-  (session as unknown as { options: { typstPath: string } }).options.typstPath =
-    await writeFakeWrapper(dataDir);
 });
 
 afterAll(async () => {

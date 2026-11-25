@@ -9,14 +9,15 @@
  * @module dsh-typst/workspace/session
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   mkdir,
+  lstat,
+  open,
   readFile,
   realpath,
   rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
@@ -29,8 +30,14 @@ import {
   resolve,
   sep,
 } from "node:path";
+import type { SandboxExecutionPolicy } from "@deepseek-ai/dsh-sandbox";
+import {
+  workspaceWritableRoots,
+  SandboxInvalidRootError,
+} from "@deepseek-ai/dsh-sandbox";
 import {
   LIMITS,
+  SOURCE_BYTES_MAX,
   SOURCE_FILE_MAX_BYTES,
   SOURCE_FILES_MAX,
   INPUT_FILES_MAX,
@@ -42,6 +49,7 @@ import type {
   PanelView,
   SetupView,
   SnapshotView,
+  SourceRefView,
   StatusView,
   ToolchainView,
   TypstStateFrame,
@@ -50,12 +58,16 @@ import {
   INSTALL_HINT,
   TypstError,
   TYPST_INVALID_ARGUMENT,
+  TYPST_MAIN_CHANGED,
   TYPST_MISSING,
   TYPST_NOT_FOUND,
   TYPST_NO_MAIN,
   TYPST_NO_PREVIEW,
+  TYPST_PAGE_OUT_OF_RANGE,
   TYPST_PATH_OUTSIDE_WORKSPACE,
   TYPST_QUOTE_NOT_FOUND,
+  TYPST_SANDBOX_INVALID_ROOT,
+  TYPST_SANDBOX_READ_ONLY,
   TYPST_TIMEOUT,
   TYPST_TOO_OLD,
   TYPST_UNUSABLE,
@@ -84,15 +96,31 @@ import {
   lineRange,
   locateInSources,
 } from "../typst/match.js";
-import { reapOrphans, Watcher } from "../typst/watcher.js";
+import { Watcher } from "../typst/watcher.js";
+import { makeBuildDir } from "../typst/owners.js";
+import { ProcessRunner } from "../typst/process.js";
+import type { SubprocessRuntime } from "@deepseek-ai/dsh-subprocess";
+import type { ResolvedConfig } from "../config.js";
+import { isWithin, resolveInside } from "./containment.js";
+import { withFileLock, writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
 
 export interface SessionOptions {
   workspaceRoot: string;
   /** The configured "Typst path" setting. */
   typstPath?: string;
+  /** Live resolver for the volatile settings; preferred over the plain fields below. */
+  resolveSettings?: () => ResolvedConfig;
+  /** Configured extra font directories (`--font-path`). */
+  fontPaths?: string[];
+  /** Configured local package directory (`--package-path`). */
+  packagePath?: string;
+  /** Configured directory names skipped during discovery. */
+  excludeDirs?: string[];
   /** Private plugin data directory (build artifacts, remembered mains). */
   dataDir?: string;
   env?: NodeJS.ProcessEnv;
+  /** The harness subprocess capability; all typst children go through it. */
+  subprocess: SubprocessRuntime;
   log?: (message: string) => void;
 }
 
@@ -127,6 +155,7 @@ export class WorkspaceSession {
   private realRoot: string | null = null;
   private readonly log: (message: string) => void;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly process: ProcessRunner;
   private readonly options: SessionOptions;
 
   private listeners = new Set<() => void>();
@@ -156,17 +185,28 @@ export class WorkspaceSession {
   private fragments: string[] = [];
   private status: StatusView = { phase: "idle", run: 0 };
   private diagnostics: DiagnosticView[] = [];
+  /** Full diagnostic count of the last round, before the frame cap. */
+  private diagnosticsTotal = 0;
   private watcher: Watcher | null = null;
+  private retiring: Watcher | null = null;
+  private stopPromise: Promise<void> = Promise.resolve();
   private watcherStartedAt = 0;
   private buildDir: string | null = null;
+  /** Cancellation handles for in-flight one-shot compiles. */
+  private readonly liveOneshots = new Set<AbortController>();
   /** When the in-flight compile started; also when the last finished one started (check uses this). */
   private compilingSince: number | null = null;
   private finishedStartedAt = 0;
+  private finishGeneration = 0;
+  /** Monotonic count of finished compiles; lets settle notice a wake it missed. */
+  private finishVersion = 0;
+  /** Input signature the last completed compile consumed. */
+  private compiledInputs: string | null = null;
   private finishWaiters = new Set<() => void>();
   private restartTimer: NodeJS.Timeout | null = null;
   private snapshots = new Map<
     number,
-    { info: SnapshotView; bytes: Uint8Array }
+    { info: SnapshotView; bytes: Uint8Array<ArrayBuffer> }
   >();
   private current: SnapshotView | null = null;
   private seq = 0;
@@ -178,6 +218,11 @@ export class WorkspaceSession {
   private activated = false;
   private closed = false;
   private pagesCache = new Map<number, PageText[]>();
+  /** Per-compile excerpt cache: one read per file, keyed by mtime. */
+  private excerptCache = new Map<
+    string,
+    { mtimeMs: number; lines: string[] }
+  >();
 
   // Setup page: host facts, "handed to the agent", re-lookup while open.
   private facts: SetupView["facts"] = null;
@@ -186,12 +231,30 @@ export class WorkspaceSession {
   private setupTicks = 0;
   private setupSubscribers = 0;
   private rechecking: Promise<void> | null = null;
+  private recheckShell = false;
 
   constructor(options: SessionOptions) {
     this.options = options;
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.log = options.log ?? (() => undefined);
     this.env = options.env ?? process.env;
+    this.process = new ProcessRunner(options.subprocess);
+  }
+
+  /**
+   * The plugin settings this session compiles with, read per request. The
+   * settings page commits volatile values in place, so a long-lived session
+   * sees a change without being rebuilt.
+   */
+  private settings(): ResolvedConfig {
+    return (
+      this.options.resolveSettings?.() ?? {
+        typstPath: this.options.typstPath ?? "",
+        fontPaths: this.options.fontPaths ?? [],
+        packagePath: this.options.packagePath ?? "",
+        excludeDirs: this.options.excludeDirs ?? [],
+      }
+    );
   }
 
   onChange(listener: () => void): () => void {
@@ -249,11 +312,14 @@ export class WorkspaceSession {
       discovery: { ...this.discovery },
       toolchain: this.toolchainView(),
       workspace: basename(this.workspaceRoot),
+      workspaceRoot: this.workspaceRoot,
       main: this.main,
       candidates: this.candidates,
       fragments: this.fragments,
       status: this.status,
       diagnostics: this.diagnostics,
+      diagnosticsTotal: this.diagnosticsTotal,
+      diagnosticsTruncated: this.diagnosticsTotal > this.diagnostics.length,
       snapshot: this.current,
       highlights: this.highlights,
       view: this.view,
@@ -299,6 +365,15 @@ export class WorkspaceSession {
     }
   }
 
+  /**
+   * Whether this session has started, or is starting, its watch. A session
+   * that never ran reads the new settings when its first request activates
+   * it, so a settings commit must not activate one just to restart it.
+   */
+  get active(): boolean {
+    return this.activation !== null;
+  }
+
   // -------------------------------------------------------------------------
   // Startup: toolchain, main file, watch
   // -------------------------------------------------------------------------
@@ -323,22 +398,29 @@ export class WorkspaceSession {
     return this.activation;
   }
 
+  /** Whether a located toolchain differs from the previously cached one. */
+  private toolchainChanged(before: Toolchain, after: Toolchain): boolean {
+    return (
+      before.state !== after.state ||
+      (before.state !== "missing" &&
+        after.state !== "missing" &&
+        before.path !== after.path) ||
+      (before.state === "ready" &&
+        after.state === "ready" &&
+        before.version !== after.version)
+    );
+  }
+
   private async detectToolchain(shell = true): Promise<void> {
     const before = this.toolchain;
     this.toolchain = await locateTypst({
-      setting: this.options.typstPath,
+      setting: this.settings().typstPath,
       env: this.env,
       shell,
+      process: this.process,
+      cwd: this.workspaceRoot,
     });
-    const changed =
-      before.state !== this.toolchain.state ||
-      (before.state !== "missing" &&
-        this.toolchain.state !== "missing" &&
-        before.path !== this.toolchain.path) ||
-      (before.state === "ready" &&
-        this.toolchain.state === "ready" &&
-        before.version !== this.toolchain.version);
-    if (!changed) return;
+    if (!this.toolchainChanged(before, this.toolchain)) return;
     if (this.toolchain.state === "ready") {
       this.log(
         `typst ${this.toolchain.version} at ${this.toolchain.path} (${this.toolchain.source})`,
@@ -376,31 +458,36 @@ export class WorkspaceSession {
    * login shell (the panel's periodic recheck uses it to avoid spawning
    * shells frequently).
    */
-  recheck(shell = true): Promise<void> {
-    this.rechecking ??= (async () => {
-      await this.activate();
-      const before = this.toolchain;
-      await this.detectToolchain(shell);
-      const changed =
-        before.state !== this.toolchain.state ||
-        (before.state !== "missing" &&
-          this.toolchain.state !== "missing" &&
-          before.path !== this.toolchain.path) ||
-        (before.state === "ready" &&
-          this.toolchain.state === "ready" &&
-          before.version !== this.toolchain.version);
-      if (!changed) return;
-      if (this.toolchain.state === "ready") {
-        await this.stopWatcher();
-        await this.refreshCandidates(true);
-        if (!this.main) this.main = await this.selectInitialMain();
-        await this.startWatcher();
-      }
-      this.emit();
-    })().finally(() => {
+  async recheck(shell = true): Promise<void> {
+    if (this.rechecking !== null) {
+      // A caller that needs the login-shell probe must not be dropped because
+      // a shell-less panel recheck happened to be in flight.
+      if (shell) this.recheckShell = true;
+      await this.rechecking;
+      return;
+    }
+    this.rechecking = this.runRecheck(shell).finally(() => {
       this.rechecking = null;
     });
-    return this.rechecking;
+    await this.rechecking;
+    if (this.recheckShell) {
+      this.recheckShell = false;
+      await this.recheck(true);
+    }
+  }
+
+  private async runRecheck(shell: boolean): Promise<void> {
+    await this.activate();
+    const before = this.toolchain;
+    await this.detectToolchain(shell);
+    if (!this.toolchainChanged(before, this.toolchain)) return;
+    if (this.toolchain.state === "ready") {
+      await this.stopWatcher();
+      await this.refreshCandidates(true);
+      if (!this.main) this.main = await this.selectInitialMain();
+      await this.startWatcher();
+    }
+    this.emit();
   }
 
   /** While the panel subscribes and Typst is unusable, re-lookup every few seconds; the preview starts by itself once Typst runs. */
@@ -440,11 +527,15 @@ export class WorkspaceSession {
   /** Refresh complete discovery; indexed absence never proves the selected main disappeared. */
   async refreshCandidates(force = false): Promise<void> {
     if (!force && Date.now() - this.candidatesAt < 2_000) return;
+    const mainAtStart = this.main;
     if (this.indexingPromise && this.indexing) await this.indexingPromise;
     else await this.discover(this.discovery.includeExcluded);
-    if (this.main && !(await this.validMain(this.main))) {
+    if (mainAtStart && !(await this.validMain(mainAtStart))) {
+      // A concurrent setMain may have chosen a different main while discovery
+      // was in flight; never overwrite that choice with this refresh's view.
+      if (this.main !== mainAtStart) return;
       await this.stopWatcher();
-      this.candidates = this.candidates.filter((path) => path !== this.main);
+      this.candidates = this.candidates.filter((path) => path !== mainAtStart);
       this.main = chooseMain(this.candidates, null);
       this.resetPreview();
       await this.startWatcher();
@@ -458,8 +549,18 @@ export class WorkspaceSession {
   private async validMain(path: string): Promise<boolean> {
     try {
       return (await stat(await this.insideWorkspace(path))).isFile();
-    } catch {
-      return false;
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (
+        code === "ENOENT" ||
+        code === "ENOTDIR" ||
+        code === TYPST_PATH_OUTSIDE_WORKSPACE
+      )
+        return false;
+      // A transient stat failure must not silently discard the main file and
+      // clear the preview; keep the choice and try again next refresh.
+      this.log(`Could not inspect ${path}: ${String(error)}`);
+      return true;
     }
   }
 
@@ -488,26 +589,41 @@ export class WorkspaceSession {
     };
     this.emit();
     const operation = (async () => {
+      const found = new Set<string>();
+      let lastEmit = 0;
       try {
         for await (const batch of indexTypFiles(
           this.workspaceRoot,
           includeExcluded,
           stopped,
+          this.settings().excludeDirs,
         )) {
           if (this.closed || stopped.aborted || this.indexing !== controller)
             return;
-          this.candidates = [
-            ...new Set([...batch.files, ...(this.main ? [this.main] : [])]),
-          ];
-          this.discovery = {
-            scanning: true,
-            includeExcluded,
-            visited: batch.visited,
-            errors: batch.errors,
-          };
-          this.emit();
+          for (const file of batch.added) found.add(file);
+          if (this.main) found.add(this.main);
+          const now = Date.now();
+          if (batch.done || now - lastEmit >= LIMITS.notifyMs) {
+            lastEmit = now;
+            this.candidates = [...found];
+            this.discovery = {
+              scanning: true,
+              includeExcluded,
+              visited: batch.visited,
+              errors: batch.errors,
+            };
+            this.emit();
+          }
         }
+        this.candidates = [...found];
         this.candidatesAt = Date.now();
+        this.emit();
+      } catch (error) {
+        // A newer discover supersedes this one; that is normal and must not
+        // reject the caller (refreshCandidates, setMain, restart) with an
+        // AbortError it did not cause.
+        if (stopped.aborted || this.indexing !== controller) return;
+        throw error;
       } finally {
         if (this.indexing === controller) {
           this.indexing = null;
@@ -528,6 +644,7 @@ export class WorkspaceSession {
   }
 
   private async performStartWatcher(): Promise<void> {
+    await this.stopPromise;
     if (
       this.closed ||
       this.watcher ||
@@ -545,7 +662,8 @@ export class WorkspaceSession {
       this.toolchain.state !== "ready"
     )
       return;
-    const fontPaths = await this.fontPaths();
+    const settings = this.settings();
+    const fontPaths = await this.fontPaths(settings.fontPaths);
     const watcher = new Watcher(
       {
         typst: this.toolchain.path,
@@ -553,8 +671,10 @@ export class WorkspaceSession {
         cwd: this.workspaceRoot,
         root: this.workspaceRoot,
         fontPaths,
+        packagePath: settings.packagePath || undefined,
         main: this.main,
         buildDir: this.buildDir,
+        process: this.process,
         env: this.env,
         toFile: (path) => this.displayPath(path),
         log: this.log,
@@ -637,39 +757,41 @@ export class WorkspaceSession {
     }
   }
 
-  private async stopWatcher(): Promise<void> {
-    await this.startingWatcher;
+  private stopWatcher(): Promise<void> {
     const watcher = this.watcher;
     this.watcher = null;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
-    await watcher?.stop();
+    this.compileToken++;
+    if (!watcher) return this.stopPromise;
+    this.retiring = watcher;
+    const done = watcher.stop().finally(() => {
+      if (this.retiring === watcher) this.retiring = null;
+    });
+    this.stopPromise = done;
+    return done;
   }
 
   private async makeBuildDir(): Promise<string> {
-    const base = join(
+    return makeBuildDir(
       this.options.dataDir ?? join(tmpdir(), "dsh-typst"),
-      "build",
+      this.log,
     );
-    await mkdir(base, { recursive: true });
-    await reapOrphans(base, this.log);
-    const dir = join(base, `${process.pid}-${randomBytes(4).toString("hex")}`);
-    await mkdir(dir, { recursive: true });
-    return dir;
   }
 
   private async finish(
     outcome: "ok" | "warnings" | "error",
     diagnostics: DiagnosticView[],
     durationMs?: number,
-    bytes?: Uint8Array,
+    bytes?: Uint8Array<ArrayBuffer>,
     previewFailure?: string,
   ): Promise<void> {
     const generation = this.generation;
     const token = this.compileToken;
     const startedAt = this.compilingSince ?? Date.now();
+    const shown = diagnostics.slice(0, LIMITS.diagnostics);
     const diagnosticsWithExcerpts = await Promise.all(
-      diagnostics.map((entry) => this.withExcerpt(entry)),
+      shown.map((entry) => this.withExcerpt(entry)),
     );
     if (
       generation !== this.generation ||
@@ -692,8 +814,11 @@ export class WorkspaceSession {
     )
       return;
     this.finishedStartedAt = startedAt;
+    this.finishGeneration = generation;
+    this.compiledInputs = (await this.inputsModifiedAt()).signature;
     this.compilingSince = null;
     this.diagnostics = diagnosticsWithExcerpts;
+    this.diagnosticsTotal = diagnostics.length;
     this.status = {
       phase: outcome,
       run: this.status.run + 1,
@@ -704,15 +829,26 @@ export class WorkspaceSession {
     // before the waiters wake: a caller that waits for the compile must see
     // the document's fragments in the frame it gets.
     if (outcome !== "error") await this.refreshFragments(generation, token);
-    if (generation !== this.generation || token !== this.compileToken) return;
-    if (this.current) await this.relocateHighlights(this.current.seq);
     if (
       generation !== this.generation ||
       token !== this.compileToken ||
       this.closed
     )
       return;
+    // With no highlights there is nothing to extract: wake immediately. With
+    // highlights, the relocated identities are part of the state a waiter
+    // reads, so finish that before waking.
+    if (this.current && this.highlights.length > 0) {
+      await this.relocateHighlights(this.current.seq);
+      if (
+        generation !== this.generation ||
+        token !== this.compileToken ||
+        this.closed
+      )
+        return;
+    }
     this.wakeWaiters();
+    this.finishVersion++;
     this.emit();
     void this.refreshCandidates().catch((error) =>
       this.log(`Discovery failed: ${String(error)}`),
@@ -760,30 +896,44 @@ export class WorkspaceSession {
     for (const wake of this.finishWaiters) wake();
   }
 
-  private waitForFinish(ms: number): Promise<boolean> {
+  private waitForFinish(ms: number, signal?: AbortSignal): Promise<boolean> {
     return new Promise((done) => {
-      const wake = (): void => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         this.finishWaiters.delete(wake);
-        done(true);
+        signal?.removeEventListener("abort", onAbort);
+        done(value);
       };
-      const timer = setTimeout(() => {
-        this.finishWaiters.delete(wake);
-        done(false);
-      }, ms);
+      const wake = (): void => finish(true);
+      const onAbort = (): void => finish(false);
+      timer = setTimeout(() => finish(false), ms);
+      timer.unref?.();
       this.finishWaiters.add(wake);
+      if (signal !== undefined) {
+        if (signal.aborted) finish(false);
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
   }
 
   private resetPreview(): void {
     this.generation++;
     this.compileToken++;
+    this.finishGeneration = 0;
+    this.compiledInputs = null;
     this.previewError = null;
     this.snapshots.clear();
     this.pagesCache.clear();
+    this.excerptCache.clear();
     this.current = null;
     this.diagnostics = [];
+    this.diagnosticsTotal = 0;
     this.highlights = [];
+    this.fragments = [];
     this.view = null;
     this.status = { phase: "idle", run: this.status.run };
   }
@@ -818,17 +968,26 @@ export class WorkspaceSession {
   private async remember(main: string): Promise<void> {
     const file = this.mainsFile;
     if (!file) return;
-    let saved: Record<string, string> = {};
-    try {
-      const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
-      if (typeof parsed === "object" && parsed !== null)
-        saved = parsed as Record<string, string>;
-    } catch {
-      // First save.
-    }
-    saved[this.realRoot ?? this.workspaceRoot] = main;
-    await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, JSON.stringify(saved, null, 2));
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    await withFileLock(
+      file,
+      async () => {
+        let saved: Record<string, string> = {};
+        try {
+          const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+          if (typeof parsed === "object" && parsed !== null)
+            saved = parsed as Record<string, string>;
+        } catch {
+          // First save.
+        }
+        saved[this.realRoot ?? this.workspaceRoot] = main;
+        await writeFileAtomic(file, JSON.stringify(saved, null, 2), {
+          mode: 0o600,
+          dirMode: 0o700,
+        });
+      },
+      { waitMs: 2_000 },
+    );
   }
 
   setMain(path: string): Promise<string> {
@@ -904,8 +1063,17 @@ export class WorkspaceSession {
     }
   }
 
-  /** Newest modification among the input files (typst's deps; else the main file and the workspace's .typ files). */
-  private async inputsModifiedAt(): Promise<number> {
+  /**
+   * Newest modification and a stable signature over the input files (typst's
+   * deps; else the main file and the workspace's .typ files). The signature
+   * includes size and mtime, so a rolled-back mtime or a same-mtime rewrite is
+   * still detected as a different input set.
+   */
+  private async inputsModifiedAt(): Promise<{
+    max: number;
+    future: boolean;
+    signature: string;
+  }> {
     let files = (await this.watcher?.deps()) ?? [];
     if (!files.length) {
       files = [this.main, ...this.candidates]
@@ -913,23 +1081,50 @@ export class WorkspaceSession {
         .map((path) => resolve(this.workspaceRoot, path));
     }
     let latest = 0;
+    const parts: string[] = [];
     await Promise.all(
       files.slice(0, INPUT_FILES_MAX).map(async (file) => {
         const info = await stat(file).catch(() => null);
-        if (info) latest = Math.max(latest, info.mtimeMs);
+        if (!info) {
+          parts.push(`${file}:missing`);
+          return;
+        }
+        latest = Math.max(latest, info.mtimeMs);
+        parts.push(`${file}:${info.mtimeMs}:${info.size}`);
       }),
     );
-    return Math.min(latest, Date.now());
+    parts.sort();
+    return {
+      max: latest,
+      future: latest > Date.now() + 1_000,
+      signature: parts.join("\n"),
+    };
   }
 
   /** Wait until every change already on disk has compiled (restart the watch when it missed changes). */
-  async settle(timeoutMs: number = LIMITS.checkTimeoutMs): Promise<void> {
+  async settle(
+    timeoutMs: number = LIMITS.checkTimeoutMs,
+    signal?: AbortSignal,
+  ): Promise<void> {
     await this.activate();
+    if (this.closed) {
+      throw new TypstError(
+        "The workspace session is closed.",
+        TYPST_WATCH_FAILED,
+      );
+    }
     if (!this.main) await this.refreshCandidates(true);
     this.requireReady();
     const deadline = Date.now() + timeoutMs;
     let restarted = false;
     for (;;) {
+      signal?.throwIfAborted();
+      if (this.closed) {
+        throw new TypstError(
+          "The workspace session is closed.",
+          TYPST_WATCH_FAILED,
+        );
+      }
       if (!this.watcher) {
         if (restarted) {
           throw new TypstError(
@@ -948,10 +1143,29 @@ export class WorkspaceSession {
         }
         continue;
       }
+      const version = this.finishVersion;
       const busy =
         this.status.phase === "starting" || this.status.phase === "compiling";
       const inputs = await this.inputsModifiedAt();
-      if (!busy && this.status.run > 0 && this.finishedStartedAt >= inputs)
+      // A compile may finish while the input signatures are being read; its
+      // wake happened before the waiter below exists, so re-evaluate instead.
+      if (this.finishVersion !== version) continue;
+      if (
+        !busy &&
+        this.status.run > 0 &&
+        this.finishGeneration === this.generation &&
+        this.compiledInputs !== null &&
+        this.compiledInputs === inputs.signature
+      )
+        return;
+      if (
+        !busy &&
+        this.status.run > 0 &&
+        this.finishGeneration === this.generation &&
+        this.compiledInputs === null &&
+        !inputs.future &&
+        this.finishedStartedAt >= inputs.max
+      )
         return;
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -962,7 +1176,9 @@ export class WorkspaceSession {
       }
       const finished = await this.waitForFinish(
         busy ? remaining : Math.min(remaining, LIMITS.settleMs),
+        signal,
       );
+      signal?.throwIfAborted();
       if (!finished && !busy && !restarted) {
         this.log(
           "typst watch did not pick up the latest changes; restarting it",
@@ -980,7 +1196,7 @@ export class WorkspaceSession {
   // -------------------------------------------------------------------------
 
   private async addSnapshot(
-    bytes: Uint8Array,
+    bytes: Uint8Array<ArrayBuffer>,
     generation: number,
     token: number,
     run: number,
@@ -1017,7 +1233,17 @@ export class WorkspaceSession {
       createdAt: Date.now(),
     };
     this.snapshots.set(info.seq, { info, bytes });
-    while (this.snapshots.size > LIMITS.snapshots) {
+    const retainedBytes = (): number => {
+      let total = 0;
+      for (const snapshot of this.snapshots.values())
+        total += snapshot.bytes.length;
+      return total;
+    };
+    while (
+      this.snapshots.size > LIMITS.snapshots ||
+      retainedBytes() > LIMITS.snapshotBytes
+    ) {
+      if (this.snapshots.size <= 1) break;
       const oldest = this.snapshots.keys().next().value;
       if (oldest === undefined) break;
       this.snapshots.delete(oldest);
@@ -1026,29 +1252,10 @@ export class WorkspaceSession {
     this.current = info;
   }
 
-  /** The current preview bytes, or a telling error. */
-  currentBytes(): { info: SnapshotView; bytes: Uint8Array } {
-    if (!this.current) {
-      throw new TypstError(
-        this.status.phase === "error"
-          ? "The document has not compiled successfully yet; fix the errors first (see typst_check)."
-          : "There is no preview yet.",
-        TYPST_NO_PREVIEW,
-      );
-    }
-    const snapshot = this.snapshots.get(this.current.seq);
-    if (!snapshot)
-      throw new TypstError(
-        `Preview ${this.current.seq} is no longer available.`,
-        TYPST_NOT_FOUND,
-      );
-    return snapshot;
-  }
-
   /** Read precisely the requested retained artifact, never silently substitute the latest. */
   previewBytes(identity: PreviewIdentity): {
     info: SnapshotView;
-    bytes: Uint8Array;
+    bytes: Uint8Array<ArrayBuffer>;
   } {
     const snapshot = this.snapshots.get(identity.seq);
     if (
@@ -1120,13 +1327,45 @@ export class WorkspaceSession {
     this.emit();
   }
 
+  /**
+   * When a highlight is created from source lines, count how many times the
+   * same rendered passage occurred before the recorded range. Typst emits
+   * repeated text in document order, so that ordinal disambiguates identical
+   * quotes on the same page.
+   */
+  private async occurrenceForSource(
+    text: string,
+    source: SourceRefView,
+  ): Promise<number> {
+    const files = await this.sourceFiles().catch(() => []);
+    const file = files.find((entry) => entry.path === source.file);
+    if (!file) return 0;
+    const starts = lineStarts(file.text);
+    const before = file.text.slice(0, starts[source.line - 1] ?? 0);
+    const folded = (value: string): string =>
+      value.replace(/\s+/g, " ").trim().toLowerCase();
+    const needle = folded(text);
+    if (!needle) return 0;
+    const haystack = folded(before);
+    let ordinal = 0;
+    let from = 0;
+    for (;;) {
+      const at = haystack.indexOf(needle, from);
+      if (at < 0) return ordinal;
+      ordinal++;
+      from = at + needle.length;
+    }
+  }
+
   /** Find text in the preview: quote matching first (tolerant of whitespace, quotes, line breaks), then skeleton approximation. */
   private findText(
     pages: PageText[],
     text: string,
     preferredPage?: number,
+    from?: number,
+    occurrence?: number,
   ): { pageIndex: number; start: number; end: number; score: number } | null {
-    const exact = findQuote(pages, text, preferredPage);
+    const exact = findQuote(pages, text, preferredPage, from, occurrence);
     if (exact)
       return {
         pageIndex: exact.pageIndex,
@@ -1165,10 +1404,35 @@ export class WorkspaceSession {
     if (target.quote) {
       text = target.quote;
     } else if (target.file && target.line) {
+      if (extname(target.file).toLowerCase() !== ".typ") {
+        throw new TypstError(
+          `${target.file} is not a .typ file.`,
+          TYPST_INVALID_ARGUMENT,
+        );
+      }
       const absolute = await this.insideWorkspace(target.file);
-      const content = await readFile(absolute, "utf8").catch(() => {
+      const handle = await open(absolute, "r").catch(() => {
         throw new TypstError(`${target.file} does not exist.`, TYPST_NOT_FOUND);
       });
+      let content: string;
+      try {
+        const info = await handle.stat();
+        if (!info.isFile()) {
+          throw new TypstError(
+            `${target.file} is not a regular file.`,
+            TYPST_INVALID_ARGUMENT,
+          );
+        }
+        if (info.size > SOURCE_FILE_MAX_BYTES) {
+          throw new TypstError(
+            `${target.file} is too large to inspect (${info.size} bytes).`,
+            TYPST_INVALID_ARGUMENT,
+          );
+        }
+        content = await handle.readFile("utf8");
+      } finally {
+        await handle.close();
+      }
       const starts = lineStarts(content);
       const endLine = Math.max(target.line, target.endLine ?? target.line);
       if (target.line > starts.length) {
@@ -1199,7 +1463,10 @@ export class WorkspaceSession {
         "The preview changed while locating the quote. Run typst_check and try again.",
         TYPST_NOT_FOUND,
       );
-    const found = this.findText(pages, text);
+    const occurrence = source
+      ? await this.occurrenceForSource(text, source)
+      : undefined;
+    const found = this.findText(pages, text, undefined, undefined, occurrence);
     if (!found) {
       throw new TypstError(
         source
@@ -1221,6 +1488,8 @@ export class WorkspaceSession {
       },
       seq: snapshot.seq,
       pageIndex: found.pageIndex,
+      startOffset: found.start,
+      ...(occurrence === undefined ? {} : { occurrence }),
       rects: rectsFor(page, found.start, found.end),
       stale: false,
       createdAt: Date.now(),
@@ -1246,7 +1515,19 @@ export class WorkspaceSession {
     }
     if (this.current?.seq !== seq) return;
     this.highlights = this.highlights.map((highlight) => {
-      const found = this.findText(pages, highlight.quote, highlight.pageIndex);
+      const from = highlight.startOffset;
+      const occurrence = highlight.occurrence;
+      const found =
+        this.findText(
+          pages,
+          highlight.quote,
+          highlight.pageIndex,
+          from,
+          occurrence,
+        ) ??
+        (from === undefined
+          ? null
+          : this.findText(pages, highlight.quote, highlight.pageIndex));
       if (!found) return { ...highlight, stale: true, rects: [] };
       const page = pages[found.pageIndex];
       return {
@@ -1259,9 +1540,22 @@ export class WorkspaceSession {
         seq,
         stale: false,
         pageIndex: found.pageIndex,
+        startOffset: found.start,
+        ...(highlight.occurrence === undefined
+          ? {}
+          : { occurrence: highlight.occurrence }),
         rects: rectsFor(page, found.start, found.end),
       };
     });
+    const activeView = this.view;
+    if (activeView?.kind === "highlight") {
+      const current = this.highlights.find(
+        (entry) => entry.id === activeView.id,
+      );
+      if (current !== undefined) {
+        this.view = { ...activeView, identity: current.identity };
+      }
+    }
     this.emit();
   }
 
@@ -1286,7 +1580,9 @@ export class WorkspaceSession {
   // -------------------------------------------------------------------------
 
   /** The project's source files: workspace `.typ` files among typst's reported deps; all candidates when deps are missing. */
-  async sourceFiles(): Promise<{ path: string; text: string }[]> {
+  async sourceFiles(
+    signal?: AbortSignal,
+  ): Promise<{ path: string; text: string }[]> {
     const deps = ((await this.watcher?.deps()) ?? []).filter((file) =>
       file.endsWith(".typ"),
     );
@@ -1295,16 +1591,19 @@ export class WorkspaceSession {
       : this.candidates.map((path) => resolve(this.workspaceRoot, path));
     const root = this.realRoot ?? this.workspaceRoot;
     const files: { path: string; text: string }[] = [];
-    for (const absolute of paths.slice(0, SOURCE_FILES_MAX)) {
+    let bytes = 0;
+    for (const absolute of paths) {
+      signal?.throwIfAborted();
+      if (files.length >= SOURCE_FILES_MAX || bytes > SOURCE_BYTES_MAX) break;
       const real = await realish(absolute);
+      if (!isWithin(root, real)) continue;
       const rel = relative(root, real);
-      if (rel.startsWith("..") || isAbsolute(rel)) continue;
       const info = await stat(real).catch(() => null);
       if (!info?.isFile() || info.size > SOURCE_FILE_MAX_BYTES) continue;
-      files.push({
-        path: rel.split(sep).join("/"),
-        text: await readFile(real, "utf8"),
-      });
+      const text = await readFile(real, "utf8");
+      if (bytes + text.length > SOURCE_BYTES_MAX) break;
+      bytes += text.length;
+      files.push({ path: rel.split(sep).join("/"), text });
     }
     return files.sort(
       (a, b) => Number(b.path === this.main) - Number(a.path === this.main),
@@ -1314,13 +1613,24 @@ export class WorkspaceSession {
   async locateSource(
     text: string,
     focus?: string,
+    signal?: AbortSignal,
   ): Promise<ReturnType<typeof locateInSources>> {
     await this.activate();
-    return locateInSources(await this.sourceFiles(), text, focus);
+    return locateInSources(await this.sourceFiles(signal), text, focus, 3, {
+      ...(signal === undefined ? {} : { signal }),
+      maxBytes: SOURCE_BYTES_MAX,
+    });
   }
 
-  /** Common workspace font directories to pass to Typst via `--font-path`. */
-  private async fontPaths(): Promise<string[]> {
+  /**
+   * Font directories passed to Typst via `--font-path`: the workspace's
+   * conventional `fonts/` and `assets/fonts/` first, then the configured
+   * directories. Project fonts therefore win on a family clash, and a
+   * configured directory typst cannot read is left for typst to ignore.
+   * @param configured - font directories from the current settings snapshot.
+   * @returns the ordered `--font-path` directories.
+   */
+  private async fontPaths(configured: readonly string[]): Promise<string[]> {
     const candidates = [
       join(this.workspaceRoot, "fonts"),
       join(this.workspaceRoot, "assets", "fonts"),
@@ -1330,6 +1640,12 @@ export class WorkspaceSession {
       const s = await stat(dir).catch(() => null);
       if (s?.isDirectory()) resolved.push(dir);
     }
+    const seen = new Set(resolved);
+    for (const dir of configured) {
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      resolved.push(dir);
+    }
     return resolved;
   }
 
@@ -1337,24 +1653,47 @@ export class WorkspaceSession {
   // One-shot compiles: render images, export
   // -------------------------------------------------------------------------
 
-  private async oneshot(): Promise<OneshotOptions> {
+  private async oneshot(signal?: AbortSignal): Promise<OneshotOptions> {
     this.requireReady();
-    const fontPaths = await this.fontPaths();
+    const settings = this.settings();
+    const fontPaths = await this.fontPaths(settings.fontPaths);
     return {
       typst: (this.toolchain as { state: "ready"; path: string }).path,
       cwd: this.workspaceRoot,
       root: this.workspaceRoot,
       fontPaths,
+      packagePath: settings.packagePath || undefined,
       main: this.main as string,
+      process: this.process,
       env: this.env,
+      ...(signal === undefined ? {} : { signal }),
       scratch: this.buildDir ?? (this.buildDir = await this.makeBuildDir()),
       toFile: (path) => this.displayPath(path),
     };
   }
 
+  /** Track one one-shot compile so close/killNow can abort it. */
+  private async withOneshot<T>(
+    signal: AbortSignal | undefined,
+    body: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const fused =
+      signal === undefined
+        ? controller.signal
+        : AbortSignal.any([signal, controller.signal]);
+    this.liveOneshots.add(controller);
+    try {
+      return await body(fused);
+    } finally {
+      this.liveOneshots.delete(controller);
+    }
+  }
+
   async renderPages(
     spec: string,
     ppi: number,
+    signal?: AbortSignal,
   ): Promise<{
     ok: boolean;
     diagnostics: DiagnosticView[];
@@ -1363,9 +1702,21 @@ export class WorkspaceSession {
     total: number | undefined;
   }> {
     await this.activate();
-    const options = await this.oneshot();
-    await this.settle().catch(() => undefined);
-    const total = this.current?.pages;
+    const mainAtStart = this.main;
+    const generationAtStart = this.generation;
+    const options = await this.oneshot(signal);
+    if (this.main !== mainAtStart || this.generation !== generationAtStart) {
+      throw new TypstError(
+        "The main file changed while preparing the render; call typst_render_pages again.",
+        TYPST_MAIN_CHANGED,
+      );
+    }
+    const settled = await this.settle(LIMITS.checkTimeoutMs, signal)
+      .then(() => true)
+      .catch(() => false);
+    // A failed settle leaves the last snapshot in place; its page count is
+    // stale, so do not use it to reject a page the new document may have.
+    const total = settled ? this.current?.pages : undefined;
     let pages: number[];
     try {
       pages = parsePages(spec, total ?? 10_000).map((index) => index + 1);
@@ -1387,9 +1738,13 @@ export class WorkspaceSession {
         TYPST_INVALID_ARGUMENT,
       );
     }
-    const result = await renderPages(options, pages, ppi);
+    const result = await this.withOneshot(signal, (fused) =>
+      renderPages({ ...options, signal: fused }, pages, ppi),
+    );
     const diagnostics = await Promise.all(
-      result.diagnostics.map((entry) => this.withExcerpt(entry)),
+      result.diagnostics
+        .slice(0, LIMITS.diagnostics)
+        .map((entry) => this.withExcerpt(entry)),
     );
     return { ...result, diagnostics, pages, total };
   }
@@ -1397,6 +1752,8 @@ export class WorkspaceSession {
   async exportPdf(
     path: string,
     extra: { pdfStandard?: string; pages?: string },
+    signal?: AbortSignal,
+    policy?: SandboxExecutionPolicy,
   ): Promise<{
     ok: boolean;
     diagnostics: DiagnosticView[];
@@ -1405,7 +1762,8 @@ export class WorkspaceSession {
     pages?: number;
   }> {
     await this.activate();
-    const options = await this.oneshot();
+    const mainAtStart = this.main;
+    const generationAtStart = this.generation;
     const absolute = await this.insideWorkspace(path);
     if (extname(absolute).toLowerCase() !== ".pdf") {
       throw new TypstError(
@@ -1413,10 +1771,85 @@ export class WorkspaceSession {
         TYPST_INVALID_ARGUMENT,
       );
     }
-    await mkdir(dirname(absolute), { recursive: true });
-    const result = await exportPdf(options, absolute, extra);
+    if (policy !== undefined) {
+      if (policy.mode === "read-only") {
+        throw new TypstError(
+          "The session is read-only; exporting a PDF would write to the workspace.",
+          TYPST_SANDBOX_READ_ONLY,
+        );
+      }
+      if (policy.mode === "workspace-write") {
+        let roots: string[];
+        try {
+          roots = workspaceWritableRoots(policy);
+        } catch (error) {
+          if (error instanceof SandboxInvalidRootError) {
+            throw new TypstError(error.message, TYPST_SANDBOX_INVALID_ROOT, {
+              cause: error,
+            });
+          }
+          throw error;
+        }
+        if (!roots.some((root) => isWithin(root, absolute))) {
+          throw new TypstError(
+            "The output path is outside the session's writable roots.",
+            TYPST_PATH_OUTSIDE_WORKSPACE,
+          );
+        }
+      }
+    }
+    const existing = await lstat(absolute).catch(() => null);
+    if (existing?.isSymbolicLink()) {
+      throw new TypstError(
+        "The output path is a symbolic link; choose a regular .pdf path.",
+        TYPST_PATH_OUTSIDE_WORKSPACE,
+      );
+    }
+    if (existing?.isDirectory()) {
+      throw new TypstError(
+        "The output path is a directory.",
+        TYPST_INVALID_ARGUMENT,
+      );
+    }
+    const settled = await this.settle(LIMITS.checkTimeoutMs, signal)
+      .then(() => true)
+      .catch(() => false);
+    const total = settled ? this.current?.pages : undefined;
+    if (typeof extra.pages === "string" && extra.pages.trim().length > 0) {
+      let selected: number[];
+      try {
+        selected = parsePages(extra.pages, 10_000);
+      } catch (error) {
+        throw new TypstError(
+          error instanceof Error ? error.message : String(error),
+          TYPST_INVALID_ARGUMENT,
+        );
+      }
+      if (selected.length === 0) {
+        throw new TypstError("No pages selected.", TYPST_INVALID_ARGUMENT);
+      }
+      if (total !== undefined && selected.some((page) => page >= total)) {
+        throw new TypstError(
+          `The document has ${total} page(s); the page selection is out of range.`,
+          TYPST_PAGE_OUT_OF_RANGE,
+        );
+      }
+    }
+    const options = await this.oneshot(signal);
+    if (this.main !== mainAtStart || this.generation !== generationAtStart) {
+      throw new TypstError(
+        "The main file changed while preparing the export; call typst_export_pdf again.",
+        TYPST_MAIN_CHANGED,
+      );
+    }
+    await mkdir(dirname(absolute), { recursive: true, mode: 0o700 });
+    const result = await this.withOneshot(signal, (fused) =>
+      exportPdf({ ...options, signal: fused }, absolute, extra),
+    );
     const diagnostics = await Promise.all(
-      result.diagnostics.map((entry) => this.withExcerpt(entry)),
+      result.diagnostics
+        .slice(0, LIMITS.diagnostics)
+        .map((entry) => this.withExcerpt(entry)),
     );
     if (!result.ok)
       return { ...result, diagnostics, path: this.relativePath(absolute) };
@@ -1434,9 +1867,11 @@ export class WorkspaceSession {
   // Paths
   // -------------------------------------------------------------------------
 
-  /** Workspace-relative path (/ separated). */
+  /** Workspace-relative path (/ separated), against the canonical root. */
   relativePath(absolute: string): string {
-    return relative(this.workspaceRoot, absolute).split(sep).join("/");
+    return relative(this.realRoot ?? this.workspaceRoot, absolute)
+      .split(sep)
+      .join("/");
   }
 
   /** A path as typst printed it (relative to the workspace root, or absolute) → display path. */
@@ -1456,30 +1891,17 @@ export class WorkspaceSession {
     if (!path || path.includes("\0")) {
       throw new TypstError("Empty path.", TYPST_INVALID_ARGUMENT);
     }
-    const absolute = resolve(this.workspaceRoot, path);
     const root =
       this.realRoot ??
       (await realpath(this.workspaceRoot).catch(() => this.workspaceRoot));
-    let existing = absolute;
-    let rest = "";
-    for (;;) {
-      try {
-        const real = await realpath(existing);
-        const full = rest ? join(real, rest) : real;
-        const rel = relative(root, full);
-        if (rel.startsWith("..") || isAbsolute(rel)) break;
-        return absolute;
-      } catch {
-        const parent = dirname(existing);
-        if (parent === existing) break;
-        rest = rest ? join(basename(existing), rest) : basename(existing);
-        existing = parent;
-      }
+    try {
+      return await resolveInside(root, resolve(this.workspaceRoot, path));
+    } catch {
+      throw new TypstError(
+        `${path} is outside the workspace.`,
+        TYPST_PATH_OUTSIDE_WORKSPACE,
+      );
     }
-    throw new TypstError(
-      `${path} is outside the workspace.`,
-      TYPST_PATH_OUTSIDE_WORKSPACE,
-    );
   }
 
   /** The erroring line of a workspace file. */
@@ -1490,11 +1912,17 @@ export class WorkspaceSession {
     if (!location || location.file.startsWith("@") || isAbsolute(location.file))
       return diagnostic;
     try {
-      const text = await readFile(
-        resolve(this.workspaceRoot, location.file),
-        "utf8",
-      );
-      const line = text.split("\n")[location.line - 1];
+      const file = resolve(this.workspaceRoot, location.file);
+      const info = await stat(file);
+      let cached = this.excerptCache.get(file);
+      if (cached === undefined || cached.mtimeMs !== info.mtimeMs) {
+        cached = {
+          mtimeMs: info.mtimeMs,
+          lines: (await readFile(file, "utf8")).split("\n"),
+        };
+        this.excerptCache.set(file, cached);
+      }
+      const line = cached.lines[location.line - 1];
       return line === undefined
         ? diagnostic
         : { ...diagnostic, excerpt: line.replace(/\s+$/, "").slice(0, 300) };
@@ -1505,19 +1933,48 @@ export class WorkspaceSession {
 
   // -------------------------------------------------------------------------
   async close(): Promise<void> {
+    if (this.closed) return;
     this.closed = true;
     this.indexing?.abort();
     this.setupSubscribers = 0;
     this.watchSetup(false);
+    for (const oneshot of this.liveOneshots) oneshot.abort();
+    this.liveOneshots.clear();
+    this.wakeWaiters();
     await this.stopWatcher();
-    if (this.buildDir)
+    this.retiring?.killNow();
+    this.retiring = null;
+    this.snapshots.clear();
+    this.pagesCache.clear();
+    this.excerptCache.clear();
+    this.highlights = [];
+    this.fragments = [];
+    this.current = null;
+    this.view = null;
+    this.diagnostics = [];
+    this.diagnosticsTotal = 0;
+    if (this.buildDir) {
       await rm(this.buildDir, { recursive: true, force: true }).catch(
         () => undefined,
       );
+      this.buildDir = null;
+    }
+    this.listeners.clear();
   }
 
   /** Synchronously end the watch (process exit). */
   killNow(): void {
+    this.closed = true;
+    this.compileToken++;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    this.indexing?.abort();
+    for (const oneshot of this.liveOneshots) oneshot.abort();
+    this.liveOneshots.clear();
+    this.wakeWaiters();
+    this.retiring?.killNow();
+    this.retiring = null;
     this.watcher?.killNow();
+    this.watcher = null;
   }
 }

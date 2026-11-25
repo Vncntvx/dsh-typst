@@ -82,8 +82,17 @@ describe("page text model", () => {
         height: 12,
       },
     ],
-    { index: 0, label: "1", width: 612, height: 792, originX: 0, originY: 0 },
+    { index: 0 },
   );
+
+  it("maps astral characters with their UTF-16 width", () => {
+    const hay = skeleton("a𠮷b");
+    expect(hay.value).toBe("a𠮷b");
+    expect(hay.map).toEqual([0, 1, 3]);
+    expect(hay.widths).toEqual([1, 2, 1]);
+    const [hit] = fuzzyFind("𠮷b", hay);
+    expect(hit).toMatchObject({ start: 1, end: 4 });
+  });
 
   it("builds page text with line separators and spans", () => {
     expect(page.text).toBe("Hello \npreview world");
@@ -94,6 +103,35 @@ describe("page text model", () => {
     const hit = findQuote([page], "Hello preview");
     expect(hit).not.toBeNull();
     expect(hit?.pageIndex).toBe(0);
+  });
+
+  it("prefers the recorded occurrence offset when a quote repeats", () => {
+    const repeated = buildPage(
+      [
+        {
+          str: "Hello world. Hello world.",
+          transform: [1, 0, 0, 1, 10, 700],
+          width: 200,
+          height: 12,
+        },
+      ],
+      { index: 0 },
+    );
+    const first = findQuote([repeated], "Hello world")!;
+    const second = findQuote([repeated], "Hello world", 0, first.end)!;
+    expect(second.start).toBeGreaterThan(first.start);
+    expect(repeated.text.slice(second.start, second.end)).toBe("Hello world");
+    // The source-line ordinal selects a later occurrence even from offset 0.
+    const byOrdinal = findQuote([repeated], "Hello world", 0, 0, 1)!;
+    expect(byOrdinal.start).toBe(second.start);
+    // A hint past the last occurrence falls back to the first one.
+    const wrapped = findQuote(
+      [repeated],
+      "Hello world",
+      0,
+      repeated.text.length,
+    )!;
+    expect(wrapped.start).toBe(first.start);
   });
 
   it("computes rectangles covering the hit", () => {

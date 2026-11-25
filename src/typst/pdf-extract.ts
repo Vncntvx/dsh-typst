@@ -15,13 +15,11 @@ import { buildPage, type PageText, type PdfTextItem } from "./text.js";
 
 interface PdfJsDocument {
   numPages: number;
-  getPageLabels(): Promise<string[] | null>;
   getPage(index: number): Promise<PdfJsPage>;
   destroy(): Promise<void>;
 }
 
 interface PdfJsPage {
-  view: [number, number, number, number];
   getTextContent(): Promise<{ items: PdfTextItem[] }>;
   cleanup(): void;
 }
@@ -37,7 +35,8 @@ let loading: Promise<PdfJsModule> | null = null;
 
 /** Load pdf.js (legacy build) once; the fake-worker entry must be set first. */
 async function pdfjs(): Promise<PdfJsModule> {
-  loading ??= (async () => {
+  if (loading !== null) return loading;
+  const pending = (async () => {
     const [pdf, worker] = await Promise.all([
       // pdf.js's own types describe the browser surface; the extraction
       // surface used here is the small one below, so the module is trusted
@@ -48,26 +47,30 @@ async function pdfjs(): Promise<PdfJsModule> {
     (globalThis as Record<string, unknown>).pdfjsWorker = worker;
     return pdf as PdfJsModule;
   })();
-  return loading;
+  loading = pending;
+  try {
+    return await pending;
+  } catch (error) {
+    // A rejected import must not be cached forever: a transient module-load
+    // failure would otherwise disable page counts and highlights for the
+    // whole process.
+    if (loading === pending) loading = null;
+    throw error;
+  }
 }
 
 /**
  * The directory pdf.js should read its cmaps and standard fonts from (the
  * installed pdfjs-dist package), or null when it cannot be resolved; typst
  * embeds its fonts, so extraction works without them.
- * @param hint - an extra candidate directory to prefer.
  */
-export function pdfjsDataDir(hint?: string | null): string | null {
-  const candidates: string[] = [];
-  if (hint) candidates.push(hint);
+export function pdfjsDataDir(): string | null {
   try {
     const require = createRequire(import.meta.url);
-    candidates.push(dirname(require.resolve("pdfjs-dist/package.json")));
+    const dir = dirname(require.resolve("pdfjs-dist/package.json"));
+    if (existsSync(join(dir, "cmaps"))) return resolve(dir) + sep;
   } catch {
-    // Not resolvable (vendored without node_modules): fall through.
-  }
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, "cmaps"))) return resolve(candidate) + sep;
+    // Not resolvable (vendored without node_modules).
   }
   return null;
 }
@@ -122,22 +125,11 @@ export async function extractPages(
   const task = await open(data, dataDir);
   try {
     const doc = await task.promise;
-    const labels = await doc.getPageLabels().catch(() => null);
     const pages: PageText[] = [];
     for (let index = 0; index < doc.numPages; index++) {
       const page = await doc.getPage(index + 1);
-      const [x1, y1, x2, y2] = page.view;
       const content = await page.getTextContent();
-      pages.push(
-        buildPage(content.items, {
-          index,
-          label: labels?.[index] || String(index + 1),
-          width: x2 - x1,
-          height: y2 - y1,
-          originX: x1,
-          originY: y1,
-        }),
-      );
+      pages.push(buildPage(content.items, { index }));
       page.cleanup();
     }
     return pages;

@@ -8,7 +8,12 @@
 
 export interface Skeleton {
   value: string;
+  /** UTF-16 start offset of each skeleton character in the original text. */
   map: number[];
+  /** UTF-16 width of the original code point each skeleton character came from. */
+  widths: number[];
+  /** UTF-16 offset of each skeleton code point inside `value`. */
+  valueUnits: number[];
 }
 
 export interface FuzzyHit {
@@ -26,18 +31,22 @@ const FOLD: Record<string, string> = { ſ: "s", ı: "i" };
 export function skeleton(text: string): Skeleton {
   let value = "";
   const map: number[] = [];
+  const widths: number[] = [];
+  const valueUnits: number[] = [];
   let index = 0;
   for (const char of text) {
     const folded = (FOLD[char] ?? char).normalize("NFKC").toLowerCase();
     for (const part of folded) {
       if (/[\p{L}\p{N}]/u.test(part)) {
+        valueUnits.push(value.length);
         value += part;
         map.push(index);
+        widths.push(char.length);
       }
     }
     index += char.length;
   }
-  return { value, map };
+  return { value, map, widths, valueUnits };
 }
 
 const SEED = 8;
@@ -56,11 +65,25 @@ export function fuzzyFind(
   const max = options.max ?? 5;
   const target = skeleton(needle).value;
   if (target.length < 2 || !hay.value.length) return [];
-  const toHit = (from: number, to: number, score: number): FuzzyHit => ({
-    start: hay.map[from],
-    end: hay.map[to - 1] + 1,
-    score,
-  });
+  const pointAt = (unit: number): number => {
+    let low = 0;
+    let high = hay.valueUnits.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (hay.valueUnits[middle] <= unit) low = middle;
+      else high = middle - 1;
+    }
+    return low;
+  };
+  const toHit = (from: number, to: number, score: number): FuzzyHit => {
+    const fromPoint = pointAt(from);
+    const toPoint = pointAt(Math.max(from, to - 1));
+    return {
+      start: hay.map[fromPoint],
+      end: hay.map[toPoint] + hay.widths[toPoint],
+      score,
+    };
+  };
   const exact: FuzzyHit[] = [];
   for (
     let at = hay.value.indexOf(target);
@@ -237,13 +260,19 @@ export function locateInSources(
   text: string,
   focus?: string,
   max = 3,
+  options: { signal?: AbortSignal; maxBytes?: number } = {},
 ): SourceMatch[] {
   const candidates: (SourceMatch & { start: number })[] = [];
+  let bytes = 0;
   for (const file of files) {
+    options.signal?.throwIfAborted();
+    bytes += file.text.length;
+    if (options.maxBytes !== undefined && bytes > options.maxBytes) break;
     const hay = skeleton(file.text);
     const starts = lineStarts(file.text);
     for (const hit of fuzzyFind(text, hay, { max })) {
-      let { start, end } = hit;
+      const { start, end } = hit;
+      let score = hit.score;
       if (focus && skeleton(focus).value.length >= 2) {
         const windowStart = Math.max(0, start - 400);
         const windowText = file.text.slice(
@@ -251,10 +280,9 @@ export function locateInSources(
           Math.min(file.text.length, end + 400),
         );
         const inner = fuzzyFind(focus, skeleton(windowText), { max: 1 })[0];
-        if (inner) {
-          start = windowStart + inner.start;
-          end = windowStart + inner.end;
-        }
+        // The focus passage ranks a candidate; it never replaces the range
+        // derived from the selected text.
+        if (inner) score = Math.min(1, score + 0.05);
       }
       const from = lineColumn(starts, start);
       const to = lineColumn(starts, Math.max(start, end - 1));
@@ -264,7 +292,7 @@ export function locateInSources(
         column: from.column,
         endLine: to.line,
         excerpt: excerpt(file.text, from.line, to.line),
-        score: hit.score,
+        score,
         start,
       });
     }

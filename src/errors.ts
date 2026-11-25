@@ -33,6 +33,24 @@ export const TYPST_WATCH_FAILED = "TYPST_WATCH_FAILED";
 export const TYPST_QUOTE_NOT_FOUND = "TYPST_QUOTE_NOT_FOUND";
 /** The Typst workbench service is not composed. */
 export const TYPST_NOT_COMPOSED = "TYPST_NOT_COMPOSED";
+/** The attachment store is missing; rendered images cannot be returned. */
+export const TYPST_ATTACHMENT_UNAVAILABLE = "TYPST_ATTACHMENT_UNAVAILABLE";
+/** The document did not compile, so the requested output was not produced. */
+export const TYPST_COMPILE_FAILED = "TYPST_COMPILE_FAILED";
+/** The session's sandbox policy forbids writing the target. */
+export const TYPST_SANDBOX_READ_ONLY = "TYPST_SANDBOX_READ_ONLY";
+/** A granted writable root cannot be enforced: missing, not a directory, or a symlink. */
+export const TYPST_SANDBOX_INVALID_ROOT = "TYPST_SANDBOX_INVALID_ROOT";
+/** A requested page is outside the document or the render budget. */
+export const TYPST_PAGE_OUT_OF_RANGE = "TYPST_PAGE_OUT_OF_RANGE";
+/** The main file changed while a one-shot compile was in flight. */
+export const TYPST_MAIN_CHANGED = "TYPST_MAIN_CHANGED";
+/** The filesystem mtime is ahead of the host clock; the document cannot settle. */
+export const TYPST_CLOCK_SKEW = "TYPST_CLOCK_SKEW";
+/** The highlight target arguments are not exactly one valid target. */
+export const TYPST_INVALID_TARGET = "TYPST_INVALID_TARGET";
+/** A compile did not settle, so the answer cannot represent the new main file. */
+export const TYPST_SETTLE_FAILED = "TYPST_SETTLE_FAILED";
 /** Something unexpected; the message carries the domain fact. */
 export const TYPST_UNEXPECTED = "TYPST_UNEXPECTED";
 
@@ -53,6 +71,15 @@ export const TYPST_ERROR_CODES = [
   TYPST_WATCH_FAILED,
   TYPST_QUOTE_NOT_FOUND,
   TYPST_NOT_COMPOSED,
+  TYPST_ATTACHMENT_UNAVAILABLE,
+  TYPST_COMPILE_FAILED,
+  TYPST_SANDBOX_READ_ONLY,
+  TYPST_SANDBOX_INVALID_ROOT,
+  TYPST_PAGE_OUT_OF_RANGE,
+  TYPST_MAIN_CHANGED,
+  TYPST_CLOCK_SKEW,
+  TYPST_INVALID_TARGET,
+  TYPST_SETTLE_FAILED,
   TYPST_UNEXPECTED,
 ] as const;
 
@@ -73,39 +100,63 @@ export class TypstError extends HarnessError {
   }
 }
 
-/** The remote layer's one failure code (details carry the domain code). */
-export const TYPST_REMOTE_DOMAIN = "typst/domain" as const;
+/**
+ * The wire code each stable domain failure crosses the Typert boundary as.
+ * Typert's protocol reserves one `<domain>/<reason>` code per failure and
+ * discriminates `RemoteFailure` by that code; the details still carry the
+ * stable domain code so a handler that needs the finer domain fact can read
+ * it without matching message text.
+ */
+export const TYPST_REMOTE_CODES = {
+  [TYPST_MISSING]: "typst/missing",
+  [TYPST_TOO_OLD]: "typst/too-old",
+  [TYPST_UNUSABLE]: "typst/unusable",
+  [TYPST_NO_MAIN]: "typst/no-main",
+  [TYPST_NO_PREVIEW]: "typst/no-preview",
+  [TYPST_NOT_FOUND]: "typst/not-found",
+  [TYPST_INVALID_ARGUMENT]: "typst/invalid-argument",
+  [TYPST_PATH_OUTSIDE_WORKSPACE]: "typst/path-outside-workspace",
+  [TYPST_TIMEOUT]: "typst/timeout",
+  [TYPST_WATCH_FAILED]: "typst/watch-failed",
+  [TYPST_QUOTE_NOT_FOUND]: "typst/quote-not-found",
+  [TYPST_NOT_COMPOSED]: "typst/not-composed",
+  [TYPST_ATTACHMENT_UNAVAILABLE]: "typst/attachment-unavailable",
+  [TYPST_COMPILE_FAILED]: "typst/compile-failed",
+  [TYPST_SANDBOX_READ_ONLY]: "typst/sandbox-read-only",
+  [TYPST_SANDBOX_INVALID_ROOT]: "typst/sandbox-invalid-root",
+  [TYPST_PAGE_OUT_OF_RANGE]: "typst/page-out-of-range",
+  [TYPST_MAIN_CHANGED]: "typst/main-changed",
+  [TYPST_CLOCK_SKEW]: "typst/clock-skew",
+  [TYPST_INVALID_TARGET]: "typst/invalid-target",
+  [TYPST_SETTLE_FAILED]: "typst/settle-failed",
+  [TYPST_UNEXPECTED]: "typst/unexpected",
+} as const satisfies Record<TypstErrorCode, `typst/${string}`>;
+
+/** Every Typert Remote failure code this plugin may emit. */
+export type TypstRemoteCode = (typeof TYPST_REMOTE_CODES)[TypstErrorCode];
 
 /**
- * Rethrow a domain failure across the Typert wire as the plugin's one
- * `typst/domain` code with the stable domain code in `details`. Consumers
- * discriminate by `details.code`, never by instanceof (the client never
- * sees these classes).
+ * Rethrow a domain failure across the Typert wire as its own
+ * `<domain>/<reason>` code, with the stable domain code in `details`.
+ * Consumers discriminate by `error.code`, never by instanceof (the client
+ * never sees these classes).
  * @param error - the thrown value.
- * @returns never; throws a `RemoteError` keyed `typst/domain`.
+ * @returns never; throws a `RemoteError` keyed `typst/<reason>`.
  */
 export function rethrowRemote(error: unknown): never {
   if (error instanceof TypstError) {
-    throw new RemoteError("typst/domain", error.message, { code: error.code });
+    throw new RemoteError(TYPST_REMOTE_CODES[error.code], error.message, {
+      code: error.code,
+    });
   }
   if (error instanceof RemoteError) throw error;
   throw new RemoteError(
-    "typst/domain",
+    TYPST_REMOTE_CODES[TYPST_UNEXPECTED],
     error instanceof Error ? error.message : String(error),
     {
       code: TYPST_UNEXPECTED,
     },
   );
-}
-
-/**
- * Throw an argument error: the message is model-facing and names the
- * offending value.
- * @param message - the model-facing argument error text.
- * @throws {TypstError} `TYPST_INVALID_ARGUMENT`.
- */
-export function invalid(message: string): never {
-  throw new TypstError(message, TYPST_INVALID_ARGUMENT);
 }
 
 /** Install guidance shown whenever Typst cannot be found. */

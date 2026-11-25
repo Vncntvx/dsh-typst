@@ -6,59 +6,20 @@
  * @module dsh-typst/host/facts
  */
 
-import { execFile } from "node:child_process";
-import { access, constants, readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir, release } from "node:os";
-import { delimiter, join, sep } from "node:path";
+import { join, sep } from "node:path";
+import { deadline } from "@deepseek-ai/dsh-timeout";
+import { runNativeCommand } from "@deepseek-ai/dsh-native-command";
 import type { HostFactsView, PackageManagerView } from "../contract.js";
+import { findExecutable } from "./which.js";
 
-function output(
-  command: string,
-  args: string[],
-  env: NodeJS.ProcessEnv,
-  timeout = 5_000,
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    try {
-      execFile(
-        command,
-        args,
-        { env, timeout, windowsHide: true },
-        (error, stdout) => resolve(error ? null : String(stdout)),
-      );
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
-async function isExecutable(path: string, platform: string): Promise<boolean> {
-  try {
-    if (!(await stat(path)).isFile()) return false;
-    await access(path, platform === "win32" ? constants.F_OK : constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findExecutable(
-  bin: string,
-  dirs: string[],
-  options: { env?: NodeJS.ProcessEnv; platform?: string } = {},
-): Promise<string | null> {
-  const env = options.env ?? process.env;
-  const platform = options.platform ?? process.platform;
-  const names =
-    platform === "win32" ? [`${bin}.exe`, `${bin}.cmd`, bin] : [bin];
-  const path = (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean);
-  for (const dir of [...path, ...dirs]) {
-    for (const name of names) {
-      const candidate = join(dir, name);
-      if (await isExecutable(candidate, platform)) return candidate;
-    }
-  }
-  return null;
+function output(command: string, args: string[]): Promise<string | null> {
+  const fuse = deadline(undefined, 5_000, "TYPST_HOST_PROBE_TIMEOUT");
+  return runNativeCommand(command, args, fuse.signal, "hidden")
+    .then(({ stdout }) => stdout)
+    .catch(() => null)
+    .finally(() => fuse[Symbol.dispose]());
 }
 
 function tilde(path: string, home: string): string {
@@ -67,13 +28,10 @@ function tilde(path: string, home: string): string {
   return path.startsWith(home + sep) ? `~${path.slice(home.length)}` : path;
 }
 
-async function osName(
-  platform: string,
-  env: NodeJS.ProcessEnv,
-): Promise<string> {
+async function osName(platform: string): Promise<string> {
   if (platform === "darwin") {
     const version = (
-      await output("/usr/bin/sw_vers", ["-productVersion"], env)
+      await output("/usr/bin/sw_vers", ["-productVersion"])
     )?.trim();
     return version ? `macOS ${version}` : "macOS";
   }
@@ -93,15 +51,11 @@ async function osName(
   return platform;
 }
 
-async function archName(
-  platform: string,
-  arch: string,
-  env: NodeJS.ProcessEnv,
-): Promise<string> {
+async function archName(platform: string, arch: string): Promise<string> {
   if (platform === "darwin") {
     if (arch === "arm64") return "Apple silicon";
     const arm = (
-      await output("/usr/sbin/sysctl", ["-n", "hw.optional.arm64"], env)
+      await output("/usr/sbin/sysctl", ["-n", "hw.optional.arm64"])
     )?.trim();
     return arm === "1" ? "Apple silicon" : "Intel";
   }
@@ -183,8 +137,8 @@ export async function detectFacts(
   const home = options.home ?? env.HOME ?? env.USERPROFILE ?? homedir();
   const specs: PmSpec[] = [...packageManagers(platform, env, home), ...extra];
   const [name, arch, tools] = await Promise.all([
-    osName(platform, env),
-    archName(platform, options.arch ?? process.arch, env),
+    osName(platform),
+    archName(platform, options.arch ?? process.arch),
     Promise.all(
       specs.map(async (spec): Promise<PackageManagerView | null> => {
         const path = await findExecutable(spec.bin, spec.dirs, {
@@ -193,7 +147,7 @@ export async function detectFacts(
         });
         if (!path) return null;
         const probe = spec.version;
-        const text = probe ? await output(path, probe.args, env) : null;
+        const text = probe ? await output(path, probe.args) : null;
         const version = text ? probe?.pattern.exec(text)?.[1] : undefined;
         return {
           name: spec.name,

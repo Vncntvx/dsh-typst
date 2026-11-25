@@ -17,11 +17,6 @@ export interface PdfTextItem {
 
 export interface PdfPageInfo {
   index: number;
-  label: string;
-  width: number;
-  height: number;
-  originX: number;
-  originY: number;
 }
 
 export interface TextSpan {
@@ -80,11 +75,6 @@ export function buildPage(items: PdfTextItem[], page: PdfPageInfo): PageText {
   }
   return {
     index: page.index,
-    label: page.label,
-    width: page.width,
-    height: page.height,
-    originX: page.originX,
-    originY: page.originY,
     text,
     spans,
   };
@@ -168,27 +158,36 @@ interface PageHit {
   end: number;
 }
 
-function findInPage(page: PageText, quote: string, from = 0): PageHit | null {
+function findInPage(
+  page: PageText,
+  quote: string,
+  from = 0,
+  occurrence = 0,
+): PageHit | null {
   for (const compact of [false, true]) {
     const haystack = normalize(page.text, compact);
     const needle = normalize(quote, compact).value.trim();
     if (!needle) return null;
-    const startAt = haystack.map.findIndex((original) => original >= from);
+    let startAt = haystack.map.findIndex((original) => original >= from);
     if (startAt < 0) continue;
-    const position = haystack.value.indexOf(needle, startAt);
-    if (position >= 0) {
-      return {
-        pageIndex: page.index,
-        start: haystack.map[position],
-        end: haystack.map[position + needle.length - 1] + 1,
-      };
+    for (let ordinal = 0; ordinal <= occurrence; ordinal++) {
+      const position = haystack.value.indexOf(needle, startAt);
+      if (position < 0) break;
+      if (ordinal === occurrence) {
+        return {
+          pageIndex: page.index,
+          start: haystack.map[position],
+          end: haystack.map[position + needle.length - 1] + 1,
+        };
+      }
+      startAt = position + needle.length;
     }
   }
   const parts = quote
     .split(/\s*(?:\.\.\.|…|\[\s*\.\.\.\s*\])\s*/)
     .filter((part) => part.trim().length >= 8);
   if (parts.length >= 2) {
-    const first = findInPage(page, parts[0], from);
+    const first = findInPage(page, parts[0], from, occurrence);
     if (first) {
       const last = findInPage(page, parts.at(-1)!, first.end);
       if (last && last.end - first.start < 3e3) {
@@ -201,12 +200,16 @@ function findInPage(page: PageText, quote: string, from = 0): PageHit | null {
 
 /**
  * Find a quote in the extracted pages: exact (folded) match first, then
- * across adjacent pages, preferring the preferred page when given.
+ * across adjacent pages, preferring the preferred page when given. `from`
+ * is a UTF-16 offset hint on the preferred page and `occurrence` names the
+ * match ordinal (from that offset) to keep when the text repeats.
  */
 export function findQuote(
   pages: PageText[],
   quote: string,
   preferredPage?: number,
+  from = 0,
+  occurrence = 0,
 ): PageHit | null {
   const order =
     preferredPage !== undefined && pages[preferredPage]
@@ -216,7 +219,15 @@ export function findQuote(
         ]
       : pages;
   for (const page of order) {
-    const match = findInPage(page, quote);
+    const onPreferred = page.index === preferredPage;
+    const match =
+      findInPage(
+        page,
+        quote,
+        onPreferred ? from : 0,
+        onPreferred ? occurrence : 0,
+      ) ??
+      (from > 0 && onPreferred ? findInPage(page, quote, 0, occurrence) : null);
     if (match) return match;
   }
   for (let index = 0; index + 1 < pages.length; index++) {

@@ -6,11 +6,11 @@
  * @module dsh-typst/typst/locate
  */
 
-import { spawn } from "node:child_process";
-import { access, constants, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, join, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { MIN_TYPST } from "../constants.js";
 import type { TypstSource } from "../contract.js";
+import { findExecutable, isExecutable } from "../host/which.js";
+import type { ProcessRunner } from "./process.js";
 
 /** Parse `typst 0.13.1`-style version output. */
 export function parseVersion(text: string): [number, number, number] | null {
@@ -94,81 +94,18 @@ export function searchedDirs(
   );
 }
 
-async function executable(path: string): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    if (!info.isFile()) return false;
-    await access(
-      path,
-      process.platform === "win32" ? constants.F_OK : constants.X_OK,
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export interface RunResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}
-
-/** Run a short-lived command to completion, capturing both streams. */
-export function run(
-  command: string,
-  args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
-): Promise<RunResult> {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let child: import("node:child_process").ChildProcess;
-    try {
-      child = spawn(command, args, {
-        cwd: options.cwd,
-        env: options.env ?? process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-    } catch (error) {
-      resolve({
-        code: null,
-        stdout,
-        stderr: error instanceof Error ? error.message : String(error),
-        timedOut,
-      });
-      return;
-    }
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, options.timeoutMs ?? 10_000);
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk;
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk;
-    });
-    child.on("error", (error: Error) => {
-      stderr += error.message;
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr, timedOut });
-    });
-  });
-}
-
 /** Ask the login shell where typst is (mise/asdf and friends). */
-async function fromShell(env: NodeJS.ProcessEnv): Promise<string | null> {
+async function fromShell(
+  env: NodeJS.ProcessEnv,
+  runner: ProcessRunner,
+  cwd: string,
+): Promise<string | null> {
   const shell = env.SHELL;
   if (!shell || process.platform === "win32") return null;
   for (const flags of ["-lc", "-ilc"]) {
-    const result = await run(shell, [flags, "command -v typst"], {
-      env,
+    const result = await runner.run([shell, flags, "command -v typst"], {
+      cwd,
+      env: { SHELL: shell },
       timeoutMs: 4_000,
     });
     const line = result.stdout
@@ -176,7 +113,7 @@ async function fromShell(env: NodeJS.ProcessEnv): Promise<string | null> {
       .map((entry) => entry.trim())
       .reverse()
       .find((entry) => isAbsolute(entry));
-    if (line && (await executable(line))) return line;
+    if (line && (await isExecutable(line))) return line;
   }
   return null;
 }
@@ -203,59 +140,60 @@ export interface LocateOptions {
   common?: string[];
   /** Skip the login-shell probe (the panel's periodic recheck does). */
   shell?: boolean;
+  /** The harness subprocess runner used for the version and login-shell probes. */
+  process: ProcessRunner;
+  /** Child working directory for those probes. */
+  cwd?: string;
 }
 
 /**
  * Locate a usable typst and check its version.
  * @returns the toolchain state; `ready` carries path/source/version.
  */
-export async function locateTypst(
-  options: LocateOptions = {},
-): Promise<Toolchain> {
+export async function locateTypst(options: LocateOptions): Promise<Toolchain> {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
   const home = options.home ?? env.HOME ?? env.USERPROFILE ?? "";
-  const names =
-    platform === "win32" ? ["typst.exe", "typst.cmd", "typst"] : ["typst"];
   let found: { path: string; source: TypstSource } | null = null;
   if (options.setting) {
-    if (!(await executable(options.setting))) {
+    // A relative setting means "relative to this workspace", the directory
+    // the typst child runs in, not to whatever cwd the Host process started in.
+    const setting = isAbsolute(options.setting)
+      ? options.setting
+      : resolve(options.cwd ?? process.cwd(), options.setting);
+    if (!(await isExecutable(setting, platform))) {
       return {
         state: "error",
-        path: options.setting,
+        path: setting,
         source: "setting",
-        error: `The Typst path in the plugin settings (${options.setting}) is not an executable file.`,
+        error: `The Typst path in the plugin settings (${setting}) is not an executable file.`,
       };
     }
-    found = { path: options.setting, source: "setting" };
+    found = { path: setting, source: "setting" };
   }
   const search = async (
     dirs: string[],
     source: TypstSource,
   ): Promise<typeof found> => {
-    for (const dir of dirs) {
-      for (const name of names) {
-        const path = join(dir, name);
-        if (dir && (await executable(path))) return { path, source };
-      }
-    }
-    return null;
+    const path = await findExecutable("typst", dirs, { env, platform });
+    return path === null ? null : { path, source };
   };
-  found ??= await search(
-    (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean),
-    "path",
-  );
+  found ??= await search([], "path");
   found ??= await search(
     options.common ?? commonDirs(platform, env, home),
     "common",
   );
   if (!found && options.shell !== false) {
-    const path = await fromShell(env);
+    const path = await fromShell(
+      env,
+      options.process,
+      options.cwd ?? process.cwd(),
+    );
     if (path) found = { path, source: "shell" };
   }
   if (!found) return { state: "missing" };
-  const result = await run(found.path, ["--version"], {
-    env,
+  const result = await options.process.run([found.path, "--version"], {
+    cwd: options.cwd ?? process.cwd(),
     timeoutMs: 10_000,
   });
   const version = parseVersion(`${result.stdout}\n${result.stderr}`);

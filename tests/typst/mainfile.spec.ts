@@ -3,7 +3,7 @@
  * @module tests/unit/mainfile
  */
 
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -29,15 +29,87 @@ afterAll(async () => {
 
 describe("indexTypFiles", () => {
   it("finds .typ files shallow-first, skipping hidden and build trees", async () => {
-    let files: string[] = [];
+    const files: string[] = [];
     for await (const batch of indexTypFiles(
       root,
       false,
       new AbortController().signal,
     ))
-      files = batch.files;
+      files.push(...batch.added);
     expect(files).toEqual(["main.typ", "slides.typ", "chapters/a.typ"]);
   });
+
+  it("skips configured directory names without case and reveals them when asked", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dsh-typst-extra-skip-"));
+    try {
+      await writeFile(join(dir, "main.typ"), "= main\n");
+      await mkdir(join(dir, "vendor"));
+      await writeFile(join(dir, "vendor", "a.typ"), "= a\n");
+      await mkdir(join(dir, "Build"));
+      await writeFile(join(dir, "Build", "b.typ"), "= b\n");
+      await mkdir(join(dir, "chapters"));
+      await writeFile(join(dir, "chapters", "c.typ"), "= c\n");
+      const collect = async (includeExcluded: boolean): Promise<string[]> => {
+        const files: string[] = [];
+        for await (const batch of indexTypFiles(
+          dir,
+          includeExcluded,
+          new AbortController().signal,
+          ["vendor", "build"],
+        ))
+          files.push(...batch.added);
+        return files;
+      };
+      expect(await collect(false)).toEqual(["main.typ", "chapters/c.typ"]);
+      expect(await collect(true)).toEqual([
+        "main.typ",
+        "Build/b.typ",
+        "chapters/c.typ",
+        "vendor/a.typ",
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "follows an in-workspace symlink and refuses an external one",
+    async () => {
+      const local = await mkdtemp(join(tmpdir(), "dsh-typst-links-"));
+      const outside = await mkdtemp(join(tmpdir(), "dsh-typst-outside-"));
+      try {
+        await mkdir(join(local, "inside"));
+        await writeFile(join(local, "inside", "x.typ"), "= x\n");
+        await writeFile(join(local, "source.typ"), "= source\n");
+        await writeFile(join(outside, "secret.typ"), "= secret\n");
+        await symlink(join(local, "inside"), join(local, "linked-dir"));
+        await symlink(join(local, "source.typ"), join(local, "alias.typ"));
+        await symlink(join(outside, "secret.typ"), join(local, "external.typ"));
+        await symlink(outside, join(local, "external-dir"));
+        const files: string[] = [];
+        for await (const batch of indexTypFiles(
+          local,
+          false,
+          new AbortController().signal,
+        ))
+          files.push(...batch.added);
+        expect(files).toContain("inside/x.typ");
+        // The symlinked directory resolves to the same real tree; it is
+        // followed once (visited-set dedupe), not enumerated twice.
+        expect(
+          files.some(
+            (file) => file === "inside/x.typ" || file === "linked-dir/x.typ",
+          ),
+        ).toBe(true);
+        expect(files).toContain("alias.typ");
+        expect(files).not.toContain("external.typ");
+        expect(files).not.toContain("external-dir/secret.typ");
+      } finally {
+        await rm(local, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("chooseMain", () => {
