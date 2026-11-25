@@ -25,7 +25,7 @@ Nested lanes are covered by their first segment (`tests/typst/locate/` is the `t
 
 ### Module ownership and splitting
 
-A spec that grows past the ratchet (`MAX_SPEC_LINES` in `scripts/test-lint.mjs`) is split along its own seams, and the ratchet is lowered in the same commit. The current ceiling is `tests/workspace/session.spec.ts`; lowering it requires splitting that spec first.
+A spec that grows past the ratchet (`MAX_SPEC_LINES` in `scripts/test-lint.mjs`) is split by behavior, and the ratchet is lowered in the same commit. `npm run lint:test` reports the largest spec when choosing where to split next.
 
 The ratchets only ever move down. A ratchet that never tightens is a comment; one that tightens by itself would fail on the next unrelated commit.
 
@@ -88,16 +88,24 @@ The guards' own predicates are driven by `tests/unit/test-lint.spec.ts`: a regex
 
 ## The documentation guards
 
-`tests/host/doc-examples.spec.ts` guards the documentation rather than the code, and it lives in the suite because a documentation error is a defect of the same kind as a broken call.
+`npm run test:docs` runs the documentation guards.
 
-It checks four things:
+`tests/host/doc-examples.spec.ts` checks every documented `typst_*` call:
 
 - **Every documented call names a tool the registry answers.** A call to a tool that no longer exists is a reader's dead end.
 - **Every documented argument is one the tool declares.** A README that prints `pdf_standard` where the schema says `pdfStandard` teaches the model a call the tool rejects.
 - **Every required argument is present, and every enum value is one the tool declares.**
-- **Every zh/en document pair carries the same number of headings.** The two files are translations of each other; a section that exists on one side only is a section that was forgotten.
 
-The spec registers the tools with a stub context, so it exercises the real schemas without running a tool.
+It discovers every file under `docs/**` plus both READMEs, registers the tools with a stub context, and exercises the real schemas without running a tool.
+
+`tests/host/doc-lockstep.spec.ts` checks the shape of the set:
+
+- **Every zh/en document pair exists.** `docs/AGENTS.md` is the single-language agent instruction and stays out of the scan.
+- **Both sides carry the same number of headings and top-level items.**
+- **Every full page opens with the language switch.** `plugin-detail.md` is a marketplace fragment with no page title, so it keeps the pair and item counts but has no switch.
+- **`docs/development.md` states the pair count derived from the directory.**
+
+`tests/host/doc-output.spec.ts` compares both tool output references with the registered schemas. `tests/host/doc-release.spec.ts` compares both release checklists with the order of commands in `release:check`.
 
 ## Validation
 

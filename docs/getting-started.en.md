@@ -6,7 +6,7 @@ dsh-typst adds a live Typst preview to DeepSeek Harness's right sidebar. The age
 
 ## Prerequisites
 
-- **Node.js 24 or later**, and a DeepSeek Harness web UI with the right docking sidebar.
+- **Node.js 24.9 or later**, and a DeepSeek Harness web UI with the right docking sidebar.
 - **Typst 0.12 or later** installed locally, for example `brew install typst` (macOS), `winget install --id Typst.Typst` (Windows), `cargo install --locked typst-cli`, or a release from <https://github.com/typst/typst/releases>.
 - A workspace that contains `.typ` files.
 
@@ -66,13 +66,13 @@ Then ask the agent to handle it:
 
 The agent calls `typst_status` to orient, reads the diagnostics with `typst_check` — location, source line, `hint:` lines and call trace — edits the file, and calls `typst_check` again to confirm. Check these things:
 
-- The preview in the panel is re-typeset after each save, without flicker and without losing your place.
+- The preview in the panel is re-typeset after each save, preserving your scroll position.
 - The entries in the **Problems** pane disappear as the errors are fixed.
 - The locations the agent reports are the ones you see in the drawer.
 
 ## Opening the preview panel
 
-The panel is available in three ways: from the sidebar's "+" menu, from the guide page, or automatically when the agent mentions Typst during a session.
+The panel is available in three ways: from the sidebar's "+" menu, from the guide page, or by reopening an existing Typst tab.
 
 Three entry points in the panel are worth knowing:
 

@@ -20,10 +20,21 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Every regular file under a directory, recursively. */
+function filesUnder(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) out.push(...filesUnder(path));
+    else if (entry.isFile()) out.push(path);
+  }
+  return out;
+}
 
 /** Strip the `./` a manifest path carries so it compares to a packed path. */
 const packed = (path) => path.replace(/^\.\//, "");
@@ -109,8 +120,12 @@ export function expectedPaths(manifest, baseDir = root) {
         continue;
       }
       if (statSync(full).isFile()) paths.add(packed(file));
-      // A directory entry contributes its tree at pack time; the tarball
-      // comparison below proves the concrete files arrived.
+      else if (statSync(full).isDirectory()) {
+        // A directory entry contributes its whole tree at pack time; expect
+        // each concrete file so a missing internal module fails here.
+        for (const child of filesUnder(full))
+          paths.add(relative(baseDir, child).split(sep).join("/"));
+      }
     }
   }
   if (typeof manifest.main === "string") paths.add(packed(manifest.main));
@@ -170,7 +185,7 @@ function verifyPack() {
   let stdout;
   try {
     stdout = execFileSync(
-      "npm",
+      process.platform === "win32" ? "npm.cmd" : "npm",
       ["pack", "--dry-run", "--json", "--ignore-scripts"],
       {
         cwd: root,

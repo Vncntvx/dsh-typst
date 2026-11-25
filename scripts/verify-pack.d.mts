@@ -1,4 +1,4 @@
-/** Type surface for the pack gate's pure helpers (unit-tested). */
+/** Type surface for the pack gate's pure helpers. */
 
 /**
  * The JSON report carried by an `npm pack --json` stdout, with any lifecycle

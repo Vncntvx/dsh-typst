@@ -13,12 +13,15 @@ dsh-typst's documentation falls into three groups: usage documents for readers, 
 
 ## Maintenance
 
-- [Architecture](architecture.en.md): layer responsibilities, data flow, services and panel surfaces.
+- [Architecture](architecture.en.md): component topology, data flow, state and concurrency, security boundaries and client contracts.
 - [Tool reference](tools.en.md): the parameters, outputs and error codes of the 7 tools.
 - [Configuration reference](configuration.en.md): settings fields, defaults and when they take effect.
 - [Development guide](development.en.md): build, debug, test and release.
 
 ## Internal
 
+- [Typst skill](skills.en.md): four phases, budgets and evidence boundaries.
+- [Development notes](development-notes.en.md): upstream patches, compromises and exit conditions.
+- [Documentation rules](AGENTS.md): document ownership, writing rules and gates.
 - [Repository rules](../AGENTS.md): constraints for agents and contributors.
 - [Test conventions](../tests/README.md): test lanes and fixture rules.

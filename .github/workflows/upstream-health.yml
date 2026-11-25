@@ -1,0 +1,54 @@
+name: Upstream Health Check
+
+on:
+  schedule:
+    # Run every Monday at 02:00 UTC (10:00 AM CST)
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-health
+  cancel-in-progress: true
+
+jobs:
+  health-check:
+    name: Upstream Dependency & Health Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify release gate and test suites
+        run: npm run release:check
+
+      # Dependency drift is a to-do, not a failure: the pin comparison below
+      # must still run so a weekly report is never silent.
+      - name: Check direct dependency releases
+        continue-on-error: true
+        run: npm run deps:check
+
+      - name: Check upstream registry updates
+        if: always()
+        run: |
+          PIN=$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh-tools']")
+          # The harness publishes its mainline under `next`; `npm view <pkg>
+          # version` would read `latest`, which tracks a different, older line.
+          LATEST=$(npm view @deepseek-ai/dsh-tools@next version 2>/dev/null || echo "unknown")
+          echo "Current pinned harness baseline: $PIN"
+          echo "Latest mainline @deepseek-ai/dsh-tools (next tag): $LATEST"
+          if [ "$LATEST" != "unknown" ] && [ "$LATEST" != "$PIN" ]; then
+            echo "::notice title=Upstream Update Detected::Harness mainline (npm next tag) is at $LATEST while dsh-typst is pinned to $PIN."
+          fi

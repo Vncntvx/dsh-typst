@@ -120,6 +120,11 @@ describe("the focused-and-disabled guard", () => {
     );
   });
 
+  it("does not treat a regex literal's // as a comment", () => {
+    const source = "const url = /https?:\\/\\//; it.only('a', () => {})";
+    expect(focusViolationsOf(source)[0]?.construct).toBe("it.only");
+  });
+
   it("reports skip and todo", () => {
     expect(focusViolationsOf("it.skip('a', () => {})")[0]?.construct).toBe(
       "it.skip",

@@ -1,0 +1,5 @@
+{
+  "pin": "dsh-v0.2.2-rc.5",
+  "commit": "9c2670d3bce5275e0d1610272958121af87787bb",
+  "packageManager": "pnpm@11.28.5"
+}

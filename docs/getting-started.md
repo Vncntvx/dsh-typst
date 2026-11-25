@@ -6,7 +6,7 @@ dsh-typst 将 Typst 实时预览接入 DeepSeek Harness 的右侧边栏。Agent 
 
 ## 前置条件
 
-- **Node.js 24 或更高**，以及一个带右侧停靠栏的 DeepSeek Harness Web 界面。
+- **Node.js 24.9 或更高**，以及一个带右侧停靠栏的 DeepSeek Harness Web 界面。
 - **Typst 0.12 或更高**已安装在本机，例如 `brew install typst`（macOS）、`winget install --id Typst.Typst`（Windows）、`cargo install --locked typst-cli`，或从 <https://github.com/typst/typst/releases> 下载。
 - 一个包含 `.typ` 文件的工作区。
 
@@ -66,7 +66,7 @@ dsh plugin --profile <name> add github:Vncntvx/dsh-typst#release
 
 Agent 会先 `typst_status` 定向，再用 `typst_check` 读到带 `file:line:column`、源码行、`hint:` 与调用链的诊断，改完文件后再次 `typst_check` 确认。核对这几件事：
 
-- 面板的预览在每次保存后重新排版，没有闪烁，滚动位置不变。
+- 面板的预览在每次保存后重新排版，滚动位置保持。
 - **问题**辅助区里的条目随修复消失。
 - Agent 的回答里给出的位置与辅助区里看到的一致。
 
@@ -76,7 +76,7 @@ Agent 会先 `typst_status` 定向，再用 `typst_check` 读到带 `file:line:c
 
 面板里的三个入口值得知道：
 
-- **缩放与页码框**：适宽、适页或按百分比缩放，页码框显示当前页。
+- **缩放与页码框**：适应宽度、适应页面或按百分比缩放，页码框显示当前页。
 - **文字与区域反馈**：选中文字后可追加到主输入框现有草稿；询问先进入可编辑请求，可核对源码候选后明确提交。框选可截取真实页面图片，支持多页区域、审阅、移除和失败重试。
 - **Agent 标注**：位置请求先通知，点击后导航，可返回原阅读位置；标注展示完整引文和备注，无法重新定位时保留过期状态。
 

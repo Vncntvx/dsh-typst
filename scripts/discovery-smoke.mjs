@@ -5,13 +5,19 @@
  * `exports["./client"]`, tarball contents, and the ClientModuleRegistry)
  * without a browser.
  *
- * Steps: npm pack → temp profile → `dsh plugin --profile <name> add <tarball>` → `dsh web
- * --port 0` → read the boot token the CLI prints → exchange it for the page
- * cookie (instance auth gates the composition) → GET /
- * → parse the `globalThis["__DSH_BOOT__"]` manifest → assert the dsh-typst
- * → assert 200 and the __ModuleLoader__.load handoff → shutdown.
+ * Steps: npm pack (or a supplied tarball) → temp profile → `dsh plugin --profile
+ * <name> add <tarball>` → `dsh web --port 0` → read the boot token the CLI
+ * prints → exchange it for the page cookie (instance auth gates the
+ * composition) → GET / → parse the `globalThis["__DSH_BOOT__"]` manifest →
+ * assert the dsh-typst entry → assert 200 and the __ModuleLoader__.load handoff
+ * → shutdown.
  *
  * Usage: node scripts/discovery-smoke.mjs [--dsh <dsh-binary>] [--home <dir>]
+ *   [--tarball <packed tarball>] [--install-only] [--browser]
+ *
+ * `--tarball` installs the exact artifact the release gate produced instead of
+ * repacking; `--install-only` stops after the profile install, which is what
+ * the non-Linux install matrix runs.
  * @module scripts/discovery-smoke
  */
 
@@ -32,7 +38,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveHarnessRoot } from "./shared/harness-packages.mjs";
-import { chromium } from "playwright";
 
 /** The plugin id the boot graph must carry, derived from the package manifest. */
 const PLUGIN_ID = JSON.parse(
@@ -43,6 +48,10 @@ const execFileAsync = promisify(execFile);
 
 const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * @param {string} flag - CLI flag whose value follows it.
+ * @returns {string | undefined}
+ */
 function argAfter(flag) {
   const index = process.argv.indexOf(flag);
   return index === -1 ? undefined : process.argv[index + 1];
@@ -68,6 +77,10 @@ const HOME = mkdtempSync(join(artifactHome ?? tmpdir(), "dsh-typst-home-"));
 const PROFILE = "web"; // `dsh web` always boots the web profile
 const ENV = { ...process.env, DSH_HOME: HOME };
 
+/**
+ * @param {string[]} args - arguments to the dsh CLI.
+ * @returns {{ command: string, args: string[] }}
+ */
 function dshCommand(args) {
   if (DSH.endsWith(".js")) {
     return { command: process.execPath, args: [DSH, ...args] };
@@ -77,7 +90,7 @@ function dshCommand(args) {
 
 function packPath() {
   const output = execFileSync(
-    "npm",
+    process.platform === "win32" ? "npm.cmd" : "npm",
     [
       "pack",
       "--silent",
@@ -98,12 +111,21 @@ function packPath() {
   return resolve(HOME, lines[lines.length - 1]);
 }
 
+/**
+ * @param {number} ms - delay in milliseconds.
+ * @returns {Promise<void>}
+ */
 function sleep(ms) {
   return new Promise((resolveDelay) => {
     setTimeout(resolveDelay, ms);
   });
 }
 
+/**
+ * @param {string} url - URL to fetch.
+ * @param {string | undefined} cookie - optional page cookie.
+ * @returns {Promise<string>}
+ */
 async function fetchText(url, cookie) {
   const response = await fetch(url, {
     headers: cookie === undefined ? {} : { cookie },
@@ -112,6 +134,17 @@ async function fetchText(url, cookie) {
   return await response.text();
 }
 
+/**
+ * The subset of the injected boot manifest the smoke probe reads.
+ * @typedef {object} BootGraph
+ * @property {{ id: string, url: string }[]} entries
+ * @property {{ entries: string[] }[]} batches
+ */
+
+/**
+ * @param {string} html - the served index HTML.
+ * @returns {BootGraph}
+ */
 function extractBootGraph(html) {
   // The webserver injects the boot graph as `globalThis["__DSH_BOOT__"] = …`
   // (the `window.` spelling is only a browser-side read alias).
@@ -126,7 +159,12 @@ function extractBootGraph(html) {
   return JSON.parse(match[1].replaceAll("\\u003c", "<"));
 }
 
-/** Poll the boot log for the one-time token the web CLI prints on startup. */
+/**
+ * Poll the boot log for the one-time token the web CLI prints on startup.
+ * @param {string} home - the profile home carrying the boot log.
+ * @param {number} [attempts] - probe count before giving up.
+ * @returns {Promise<string>}
+ */
 async function waitForBootToken(home, attempts = 240) {
   const logPath = join(home, "dsh-web.log");
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -143,7 +181,12 @@ async function waitForBootToken(home, attempts = 240) {
   throw new Error("dsh web printed no boot token within the probe window");
 }
 
-/** Exchange the one-time boot token for the page cookie every request carries. */
+/**
+ * Exchange the one-time boot token for the page cookie every request carries.
+ * @param {number} port - local web server port.
+ * @param {string} token - one-time boot token.
+ * @returns {Promise<string>}
+ */
 async function exchangeTokenForCookie(port, token) {
   const response = await fetch(`http://127.0.0.1:${port}/?token=${token}`, {
     redirect: "manual",
@@ -158,6 +201,12 @@ async function exchangeTokenForCookie(port, token) {
   return setCookie.split(";")[0];
 }
 
+/**
+ * @param {number} port - local web server port.
+ * @param {string} cookie - page cookie.
+ * @param {number} [attempts] - probe count before giving up.
+ * @returns {Promise<string>}
+ */
 async function waitForIndex(port, cookie, attempts = 240) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -173,55 +222,101 @@ async function waitForIndex(port, cookie, attempts = 240) {
   );
 }
 
+/** @returns {Promise<number>} */
 async function reservePort() {
   const server = createServer();
   await new Promise((resolveListen) => {
-    server.listen(0, "127.0.0.1", resolveListen);
+    server.listen(0, "127.0.0.1", /** @type {() => void} */ (resolveListen));
   });
-  const port = server.address().port;
+  const port = /** @type {import("node:net").AddressInfo} */ (server.address())
+    .port;
   await new Promise((resolveClose) => {
-    server.close(resolveClose);
+    server.close(/** @type {() => void} */ (resolveClose));
   });
   return port;
 }
 
+/**
+ * Prove the packed server half can resolve its runtime-only dependencies from
+ * the profile that owns the install. Client discovery alone cannot see this:
+ * `pdfjs-dist` is imported lazily by the server's PDF inspector, so a wrong
+ * manifest section only surfaces when the plugin actually runs.
+ * @returns {Promise<void>}
+ */
+async function verifyInstalledRuntime() {
+  const result = await execFileAsync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { createRequire } from "node:module";
+      import { dirname, join } from "node:path";
+      import { pathToFileURL } from "node:url";
+      const require = createRequire(import.meta.url);
+      const manifest = require.resolve(${JSON.stringify(`${PLUGIN_ID}/package.json`)});
+      const extract = pathToFileURL(join(dirname(manifest), "lib/typst/pdf-extract.js")).href;
+      const { pdfjsDataDir } = await import(extract);
+      if (pdfjsDataDir() === null) throw new Error("installed plugin cannot resolve pdfjs-dist");
+      console.log("installed runtime ok: pdfjs-dist resolves");`,
+    ],
+    {
+      cwd: join(HOME, "profiles", PROFILE),
+      env: ENV,
+      timeout: 60_000,
+    },
+  );
+  console.log(result.stdout.trim());
+}
+
 async function main() {
-  const tarball = packPath();
+  const suppliedTarball = argAfter("--tarball");
+  const tarball =
+    suppliedTarball === undefined ? packPath() : resolve(suppliedTarball);
   console.log(`packed: ${tarball}`);
   console.log(`home: ${HOME} (profile ${PROFILE})`);
 
   const add = dshCommand(["plugin", "--profile", PROFILE, "add", tarball]);
   await execFileAsync(add.command, add.args, { env: ENV });
-  const documents = join(HOME, "Documents");
-  const workspace = join(documents, "deepseek-harness", "default-workspace");
-  mkdirSync(workspace, { recursive: true });
-  writeFileSync(
-    join(workspace, "main.typ"),
-    "= Preview smoke\nReadable selection text.\n#v(80mm)\n== Lower heading\nLower paragraph.\n#pagebreak()\n= Second page\nSecond page text.\n",
-  );
-  writeFileSync(
-    join(workspace, "slides.typ"),
-    "= Slides smoke\nA separate document.\n",
-  );
-  writeFileSync(
-    join(HOME, "profiles", PROFILE, "cordis.patch.yml"),
-    `- id: workspace-controller\n  config:\n    documentsDirectory: ${JSON.stringify(documents)}\n`,
-  );
+  await verifyInstalledRuntime();
 
-  // The reserved port can be stolen between reserve and bind; retry the whole
-  // serve on EADDRINUSE instead of failing the run on a TOCTOU loss.
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      await serveOnce(await reservePort());
-      break;
-    } catch (error) {
-      if (error?.code !== "EADDRINUSE" || attempt === 3) throw error;
-      console.log(`port stolen (attempt ${attempt}); retrying on a fresh port`);
+  if (!process.argv.includes("--install-only")) {
+    const documents = join(HOME, "Documents");
+    const workspace = join(documents, "deepseek-harness", "default-workspace");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(
+      join(workspace, "main.typ"),
+      "= Preview smoke\nReadable selection text.\n#v(80mm)\n== Lower heading\nLower paragraph.\n#pagebreak()\n= Second page\nSecond page text.\n",
+    );
+    writeFileSync(
+      join(workspace, "slides.typ"),
+      "= Slides smoke\nA separate document.\n",
+    );
+    writeFileSync(
+      join(HOME, "profiles", PROFILE, "cordis.patch.yml"),
+      `- id: workspace-controller\n  config:\n    documentsDirectory: ${JSON.stringify(documents)}\n`,
+    );
+
+    // The reserved port can be stolen between reserve and bind; retry the whole
+    // serve on EADDRINUSE instead of failing the run on a TOCTOU loss.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await serveOnce(await reservePort());
+        break;
+      } catch (error) {
+        if (
+          /** @type {NodeJS.ErrnoException} */ (error)?.code !== "EADDRINUSE" ||
+          attempt === 3
+        )
+          throw error;
+        console.log(
+          `port stolen (attempt ${attempt}); retrying on a fresh port`,
+        );
+      }
     }
   }
 
   try {
-    rmSync(tarball, { force: true });
+    if (suppliedTarball === undefined) rmSync(tarball, { force: true });
     if (artifactHome === undefined)
       rmSync(HOME, { recursive: true, force: true });
   } catch {
@@ -230,6 +325,10 @@ async function main() {
   console.log("discovery-smoke: passed");
 }
 
+/**
+ * @param {number} port - reserved local port to serve the composition on.
+ * @returns {Promise<void>}
+ */
 async function serveOnce(port) {
   const logPath = join(HOME, "dsh-web.log");
   const logFd = openSync(logPath, "w");
@@ -298,7 +397,13 @@ async function serveOnce(port) {
       // The child already failed to spawn; `closed` below carries the error.
     }
     try {
-      await closed;
+      // A child that ignores SIGTERM must not hang the smoke run.
+      const hardKill = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      try {
+        await closed;
+      } finally {
+        clearTimeout(hardKill);
+      }
     } finally {
       try {
         closeSync(logFd);
@@ -317,8 +422,8 @@ async function serveOnce(port) {
       // No log to attribute with; fall through to the generic failure below.
     }
     if (log.includes("EADDRINUSE")) {
-      const stolen = new Error(
-        `dsh web could not bind port ${port} (EADDRINUSE)`,
+      const stolen = /** @type {NodeJS.ErrnoException} */ (
+        new Error(`dsh web could not bind port ${port} (EADDRINUSE)`)
       );
       stolen.code = "EADDRINUSE";
       throw stolen;
@@ -329,9 +434,24 @@ async function serveOnce(port) {
   }
 }
 
+/**
+ * Drive the packed bundle through a real browser and assert the preview renders.
+ * @param {number} port - local web server port.
+ * @param {string} cookie - page cookie.
+ * @returns {Promise<void>}
+ */
 async function verifyBrowser(port, cookie) {
+  // Playwright is a Linux-only install in CI; the import stays lazy so the
+  // install matrix can run this script without repository dev dependencies.
+  const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
-  const browserContext = await browser.newContext();
+  // The official home renders a Canvas PixelWhale animation. On a macOS
+  // headless shell its frame loop starves the page before the first-run
+  // controls appear, so the probe opts out of decorative motion. The preview
+  // itself keeps its real Worker, canvas and text layer.
+  const browserContext = await browser.newContext({
+    reducedMotion: "reduce",
+  });
   const [cookieName, ...cookieParts] = cookie.split("=");
   await browserContext.addCookies([
     {
@@ -342,7 +462,9 @@ async function verifyBrowser(port, cookie) {
     },
   ]);
   const page = await browserContext.newPage();
+  /** @type {string[]} */
   const pageErrors = [];
+  /** @type {string[]} */
   const requests = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("console", (message) => {

@@ -24,7 +24,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,7 +74,7 @@ const ALLOWED_CONTROL = new Set([0x09, 0x0a, 0x0d]);
 /**
  * Ratchet: the most lines one spec file may occupy. Lower it in the same
  * commit that splits a file, never preemptively. The current ceiling is
- * `tests/workspace/session.spec.ts`; lowering it requires splitting that
+ * `tests/host/doc-examples.spec.ts`; lowering it requires splitting that
  * spec first.
  */
 const MAX_SPEC_LINES = 210;
@@ -310,7 +310,7 @@ function checkHelperSize() {
 /** A spec's location is decided by the module it tests, so only lanes are allowed. */
 function checkLanes() {
   for (const path of specFiles()) {
-    const lane = relative(join(root, "tests"), join(root, path)).split("/")[0];
+    const lane = relative(join(root, "tests"), join(root, path)).split(sep)[0];
     const segment =
       lane.endsWith(".spec.ts") || lane.endsWith(".spec.tsx") ? "" : lane;
     if (!SPEC_LANES.includes(segment)) {
@@ -330,10 +330,10 @@ function checkLanes() {
  * character's offset, so match positions in the stripped text still map to
  * real line numbers.
  *
- * Regex literals are deliberately not stripped: telling a division from a
- * regex needs a full lexer, a mistake there would blank real code (hiding a
- * violation), and a regex body containing `.only(`/`.skip(` does not occur in
- * this suite.
+ * Regex literals are skipped with a previous-significant-character heuristic,
+ * so a `//` inside a regex body is not read as a line comment. The heuristic
+ * only decides whether a slash may start a regex; it never blanks the body,
+ * so a `.only(` inside one remains visible.
  *
  * `blankStrings = false` keeps string bodies intact. The upstream-source
  * import guard needs both readings: comments removed so a documented example
@@ -344,6 +344,21 @@ function checkLanes() {
  * @param blankStrings - whether to blank string and template bodies too.
  * @returns same-length text with comments (and optionally strings) blanked.
  */
+/**
+ * Whether a `/` at `index` may start a regex literal rather than division.
+ * @param source - the file content.
+ * @param index - position of the slash.
+ * @returns true when the previous significant character admits a regex.
+ */
+function regexMayStart(source, index) {
+  for (let at = index - 1; at >= 0; at -= 1) {
+    const ch = source[at];
+    if (/\s/.test(ch)) continue;
+    return /[([{,;:!&|?=+\-*%^~<>]/.test(ch);
+  }
+  return true;
+}
+
 export function stripCommentsAndStrings(source, blankStrings = true) {
   const out = source.split("");
   const n = source.length;
@@ -372,6 +387,28 @@ export function stripCommentsAndStrings(source, blankStrings = true) {
         if (source[i] !== "\n") out[i] = " ";
         i += 1;
       }
+      continue;
+    }
+    // A regex literal: skip to its closing unescaped slash (outside a
+    // character class), then its flags. Its body stays visible.
+    if (ch === "/" && regexMayStart(source, i)) {
+      i += 1;
+      let inClass = false;
+      while (i < n) {
+        const part = source[i];
+        if (part === "\\") {
+          i += 2;
+          continue;
+        }
+        if (part === "[") inClass = true;
+        else if (part === "]") inClass = false;
+        else if (part === "/" && !inClass) {
+          i += 1;
+          break;
+        } else if (part === "\n") break;
+        i += 1;
+      }
+      while (i < n && /[a-z]/i.test(source[i])) i += 1;
       continue;
     }
     if (blankStrings && (ch === '"' || ch === "'" || ch === "`")) {
@@ -464,9 +501,9 @@ function checkFocus() {
  * resolution in the registry-only client lane CI runs. `src/**` and
  * `tests/**` must depend on public entries only.
  *
- * Only import syntax counts: `tests/unit/harness-state.spec.ts` legitimately
- * carries `/src/` specifiers inside string fixtures for its own artifact
- * audit. A commented-out example is not a dependency either. Comparing a
+ * Only import syntax counts: a string fixture that mentions a `/src/`
+ * specifier (a documented example, a test's own artifact audit) is not a
+ * dependency. A commented-out example is not one either. Comparing a
  * comment-only stripping with the full comment-and-string blanking at the
  * match position is what keeps those two cases out of the result.
  *

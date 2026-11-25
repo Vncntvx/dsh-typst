@@ -73,7 +73,11 @@ const HARNESS_MIRRORED = new Set([
   "zustand",
 ]);
 
-/** The declared range for a direct dependency, or undefined when it is not one. */
+/**
+ * The declared range for a direct dependency, or undefined when it is not one.
+ * @param {string} name - package name.
+ * @returns {string | undefined}
+ */
 function declaredRange(name) {
   const range =
     manifest.dependencies?.[name] ?? manifest.devDependencies?.[name];
@@ -83,31 +87,52 @@ function declaredRange(name) {
 /** Respect `.npmrc` and environment overrides instead of hardcoding npmjs. */
 function registryBase() {
   try {
-    const url = execFileSync("npm", ["config", "get", "registry"], {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const url = execFileSync(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      ["config", "get", "registry"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
     return url.replace(/\/$/, "");
   } catch {
     return "https://registry.npmjs.org";
   }
 }
 
+/**
+ * The registry's `latest` dist-tag for one package.
+ * @param {string} registry - registry base URL.
+ * @param {string} name - package name.
+ * @returns {Promise<string>}
+ */
 async function latestVersion(registry, name) {
   const response = await fetch(`${registry}/${name.replace("/", "%2F")}`, {
     headers: { accept: "application/vnd.npm.install-v1+json" },
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const packument = await response.json();
+  const packument = /** @type {{ "dist-tags"?: { latest?: string } }} */ (
+    await response.json()
+  );
   const latest = packument["dist-tags"]?.latest;
   if (!valid(latest))
     throw new Error("packument carries no valid dist-tags.latest");
   return latest;
 }
 
+/**
+ * Run `task` over `items` with at most `limit` in flight, preserving order.
+ * @template T, R
+ * @param {readonly T[]} items - inputs.
+ * @param {number} limit - maximum concurrency.
+ * @param {(item: T) => Promise<R>} task - one lookup.
+ * @returns {Promise<R[]>}
+ */
 async function mapLimit(items, limit, task) {
+  /** @type {R[]} */
   const results = new Array(items.length);
   let cursor = 0;
   const worker = async () => {
@@ -122,6 +147,11 @@ async function mapLimit(items, limit, task) {
   return results;
 }
 
+/**
+ * The version the lockfile records for one installed package.
+ * @param {string} name - package name.
+ * @returns {string | undefined}
+ */
 function installedVersion(name) {
   return lock.packages?.[`node_modules/${name}`]?.version;
 }
@@ -152,12 +182,22 @@ const lookups = await mapLimit(targets, CONCURRENCY, async (name) => {
 const failures = lookups.filter((lookup) => lookup.error !== undefined);
 const rows = lookups
   .filter(
-    (lookup) => lookup.error === undefined && gt(lookup.latest, lookup.current),
+    (lookup) =>
+      lookup.error === undefined &&
+      gt(
+        /** @type {string} */ (lookup.latest),
+        /** @type {string} */ (lookup.current),
+      ),
   )
   .map((lookup) => ({
     ...lookup,
     range: declaredRange(lookup.name),
-    level: (diff(lookup.current, lookup.latest) ?? "patch").replace(/^pre/, ""),
+    level: (
+      diff(
+        /** @type {string} */ (lookup.current),
+        /** @type {string} */ (lookup.latest),
+      ) ?? "patch"
+    ).replace(/^pre/, ""),
   }))
   .sort(
     (a, b) =>

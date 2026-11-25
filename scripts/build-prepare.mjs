@@ -24,7 +24,7 @@
  * @module scripts/build-prepare
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -37,8 +37,13 @@ const SOURCE_DIR = join(root, "src");
 /** The browser half's source root, excluded from the Node transpile. */
 const CLIENT_DIR = join(SOURCE_DIR, "client");
 
-/** Every Node-half TypeScript source file, in stable order. */
+/**
+ * Every Node-half TypeScript source file, in stable order.
+ * @param {string} [dir] - directory to scan; defaults to the Node-half root.
+ * @returns {string[]} absolute source paths, sorted.
+ */
 function nodeSources(dir = SOURCE_DIR) {
+  /** @type {string[]} */
   const found = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -47,7 +52,8 @@ function nodeSources(dir = SOURCE_DIR) {
       found.push(...nodeSources(path));
       continue;
     }
-    if (entry.name.endsWith(".ts")) found.push(path);
+    if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts"))
+      found.push(path);
   }
   return found.sort();
 }
@@ -57,15 +63,19 @@ function nodeSources(dir = SOURCE_DIR) {
  * entry can accept a tree whose internal module or declaration is missing;
  * require the complete Node emit plus the browser bundle instead.
  */
+/** @returns {string[]} */
 function fullBuildOutputs() {
   return [
-    ...nodeSources().flatMap((source) => {
-      const stem = relative(SOURCE_DIR, source).replace(/\.ts$/, "");
-      return [
-        join(root, "lib", `${stem}.js`),
-        join(root, "lib", `${stem}.d.ts`),
-      ];
-    }),
+    ...nodeSources().flatMap(
+      /** @param {string} source */
+      (source) => {
+        const stem = relative(SOURCE_DIR, source).replace(/\.ts$/, "");
+        return [
+          join(root, "lib", `${stem}.js`),
+          join(root, "lib", `${stem}.d.ts`),
+        ];
+      },
+    ),
     join(root, "lib", "client.js"),
   ];
 }
@@ -105,6 +115,38 @@ await esbuild.build({
   logLevel: "warning",
 });
 console.log(`transpiled ${entryPoints.length} Node-half module(s) into lib/`);
+
+// A previous build may have left a JS artifact for a source that no longer
+// emits one (the retired `pdfjs-worker.d.js`); the packed tree must not carry
+// modules no source produces.
+const expectedJs = new Set(
+  entryPoints.map(
+    /** @param {string} source */
+    (source) => relative(SOURCE_DIR, source).replace(/\.ts$/, ".js"),
+  ),
+);
+expectedJs.add("client.js");
+/**
+ * @param {string} dir - directory to prune.
+ * @param {string} [prefix] - path prefix relative to `lib/` for reporting.
+ * @returns {void}
+ */
+function removeOrphanOutputs(dir, prefix = "") {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      removeOrphanOutputs(path, rel);
+      continue;
+    }
+    if (!/\.js(?:\.map)?$/.test(entry.name)) continue;
+    const stem = rel.replace(/\.js(?:\.map)?$/, ".js");
+    if (expectedJs.has(stem)) continue;
+    rmSync(path, { force: true });
+    console.log(`removed orphan build artifact ${rel}`);
+  }
+}
+removeOrphanOutputs(join(root, "lib"));
 
 await buildClientBundle();
 
