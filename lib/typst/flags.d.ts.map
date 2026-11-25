@@ -1,0 +1,1 @@
+{"version":3,"file":"flags.d.ts","sourceRoot":"","sources":["../../src/typst/flags.ts"],"names":[],"mappings":"AAAA,mEAAmE;AACnE,MAAM,WAAW,gBAAgB;IAC/B,IAAI,CAAC,EAAE,MAAM,CAAC;IACd,SAAS,CAAC,EAAE,MAAM,EAAE,CAAC;IACrB,WAAW,CAAC,EAAE,MAAM,CAAC;CACtB;AAED,wBAAgB,UAAU,CAAC,EACzB,IAAI,EACJ,SAAS,EACT,WAAW,GACZ,EAAE,gBAAgB,GAAG,MAAM,EAAE,CAM7B"}

@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "title": "dsh-typst",
+    "description": "DeepSeek Harness 的 Typst 插件：在右侧栏实时预览你正在编辑的文档，由本机已装好的 Typst 编译。Agent 可用工具检查错误、查看渲染页面、在预览中标出位置并导出 PDF。",
+    "detail": "docs/plugin-detail.md"
+  },
+  "typstPath": "Typst 路径",
+  "typstPathHint": "可选。typst 可执行文件的路径，可写绝对路径，也可写相对工作区的路径。留空时依次查找 PATH、常见安装位置和登录 shell。只有 Typst 装在别处才需要填写。",
+  "fontPaths": "字体目录",
+  "fontPathsHint": "可选。额外的字体目录，排在工作区 fonts/ 和 assets/fonts/ 之后读取。多个目录用逗号分隔。路径本身含逗号时用双引号括住。开头的 ~ 表示主目录。",
+  "packagePath": "包目录",
+  "packagePathHint": "可选。typst 查找本地包的目录（--package-path）：放自己的 @local 包，或 @preview 包的离线镜像。留空时用 typst 的默认位置。",
+  "excludeDirs": "排除目录",
+  "excludeDirsHint": "可选。扫描主文件时额外跳过的目录名，任意层级、不区分大小写。只写名称，不写路径，多个用逗号分隔，在内置列表（node_modules、target、__pycache__、venv、build、dist）之上追加。"
+}
