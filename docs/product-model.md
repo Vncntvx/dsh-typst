@@ -14,7 +14,7 @@ dsh-typst 将 ZCode typst-workbench 的面板接入 DeepSeek Harness 的原生�
 | 快照(Snapshot)               | 一次成功编译的 PDF 字节 + 元数据(generation/seq/run/pages/sha256)；保留最近 `LIMITS.snapshots` 份 |
 | 高亮(Highlight)              | `typst_show` 放置的标注：引文 + PDF 用户空间矩形，重编译后按引文重新定位，找不到转 stale          |
 | 主文件(Main file)            | 传给 `typst compile` 的那个文件；自动选择、面板菜单或 `typst_set_main` 指定，按工作区记忆         |
-| 文档(Document)               | 主文件编译出的 PDF；其他 `.typ` 文件是否能独立编译不能由索引判断                                  |
+| 文档(Document)               | 主文件编译出的 PDF；索引只按文件分组，其他 `.typ` 文件的可编译性由实际编译确认                    |
 | 片段(Fragment)               | 被当前文档用 `#include`/`#import` 引用的 `.typ` 文件；单独编译它通常没有意义                      |
 | 大纲(Outline)                | 文档的标题层级：typst 写进 PDF 的书签，面板保留书签完整目的地并精确导航                           |
 | settle                       | `typst_check` 的等待语义：磁盘上已有的改动全部编译完成才返回；watch 漏改时重启它                  |
@@ -32,7 +32,7 @@ dsh-typst 将 ZCode typst-workbench 的面板接入 DeepSeek Harness 的原生�
 
 两条路径各司其职，互不代理：
 
-- **界面不直接调用工具**：「加入对话」追加主输入框草稿；「询问」、修复和安装请求先进入插件可编辑草稿，用户明确提交后通过公开会话接口发送。区域截图在插件草稿中审阅。
+- **界面走公开接口**：「加入对话」追加主输入框草稿；「询问」、修复和安装请求先进入插件可编辑草稿，用户明确提交后通过公开会话接口发送。区域截图在插件草稿中审阅。
 - **工具调用不干扰界面**：Agent 在后台调用工具编译、渲染或标注，先产生位置通知，用户点击才导航，支持返回原阅读位置。
 
 ## 一个组件
@@ -61,11 +61,11 @@ graph LR
     P -.->|public draft / session API| Chat[Conversation]
 ```
 
-面板从不轮询：状态由 host 的 `typst/watch` 流推送，PDF 按 generation/seq/sha256 精确拉取；读取过期快照会明确失败，不能替换成最新字节。
+面板状态由 host 的 `typst/watch` 流推送，PDF 按 generation/seq/sha256 精确拉取；读取过期快照会明确失败，返回的字节始终属于请求时的身份。
 
 ## 四条边界
 
-1. **不写源文件**：插件从不编辑 `.typ` 文件。写入发生在两处：`typst_export_pdf` 写入工作区，预览产物写入插件私有缓存目录（`~/.dsh/cache/typst`）。
+1. **源文件只读**：插件不编辑 `.typ`。写入只有两处：`typst_export_pdf` 写入工作区，预览产物写入插件私有缓存目录（`~/.dsh/cache/typst`）。
 2. **不越工作区**：每个路径都经 `WorkspaceSession.insideWorkspace` 解析并收敛，越界的路径被拒绝（`TYPST_PATH_OUTSIDE_WORKSPACE`）。
 3. **不联网**：插件自身不发任何网络请求。Typst 首次使用 `@preview` 包时会自行下载，与终端一致。
 4. **不接管 `.pdf` 打开**：工作区里的 `.pdf` 仍由宿主内置的文档预览打开，插件不改变这一职责。

@@ -1,5 +1,5 @@
 /**
- * Types for `scripts/style-guard.mjs`, driven by `tests/unit/style-guard`.
+ * Types for `scripts/style-guard.mjs`.
  * @module dsh-typst/scripts/style-guard
  */
 
@@ -95,18 +95,14 @@ export declare function rulesOf(css: string): StyleRule[];
  */
 export declare function declarationsOf(body: string): StyleDeclaration[];
 
-/**
- * Every design-system token a stylesheet references.
- * @param text - stylesheet source, or a single value.
- * @returns the referenced names, `--` prefix included.
- */
-export declare function tokenReferencesOf(text: string): string[];
-
 /** Token references that name no published token. */
 export declare const unknownTokenViolations: StyleGuard;
 
 /** Literal `font-size`/`line-height` values off the typography ladder. */
 export declare const bareFontScaleViolations: StyleGuard;
+
+/** Weights above the 500 ceiling, including the `font` shorthand. */
+export declare const fontWeightViolations: StyleGuard;
 
 /** Literal colours outside the palette, mask coverage excepted. */
 export declare const literalColorViolations: StyleGuard;
@@ -116,6 +112,12 @@ export declare const fullRoundRadiusViolations: StyleGuard;
 
 /** State-coloured borders thinner than one pixel. */
 export declare const stateBorderViolations: StyleGuard;
+
+/** Elevated surfaces that pair a neutral border with an elevation shadow. */
+export declare const elevatedSurfaceViolations: StyleGuard;
+
+/** Neutral flat borders and separators not drawn at the 0.5px hairline. */
+export declare const neutralHairlineViolations: StyleGuard;
 
 /** `:hover` rules outside `@media (hover: hover)`. */
 export declare const hoverMediaViolations: StyleGuard;

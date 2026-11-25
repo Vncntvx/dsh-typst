@@ -1,6 +1,7 @@
-import { useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { Translate } from "./types.js";
+import { errorText } from "./types.js";
 import styles from "./preview.module.css";
 
 /** Single-page rectangles compose into a multi-page feedback draft. */
@@ -30,6 +31,12 @@ export function RegionSelector({
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const layer = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // The overlay owns Escape and the arrow keys; focus must move into it as
+    // soon as the mode opens, before the user clicks the page.
+    layer.current?.focus();
+  }, []);
   const point = (event: PointerEvent<HTMLElement>): number[] => {
     const box = event.currentTarget.getBoundingClientRect();
     return [
@@ -44,7 +51,7 @@ export function RegionSelector({
     try {
       await onCapture(rect);
     } catch (failure) {
-      setError(String(failure));
+      setError(errorText(failure));
     } finally {
       setBusy(false);
     }
@@ -68,6 +75,7 @@ export function RegionSelector({
   return (
     <>
       <div
+        ref={layer}
         className={styles.regionLayer}
         tabIndex={0}
         role="group"
@@ -157,18 +165,25 @@ export function RegionSelector({
         </div>
       </div>
       <div className={styles.regionActions}>
-        <span>{t("region.instructions")}</span>
-        <Button
-          size="sm"
-          disabled={busy || rect[2] - rect[0] < 2 || rect[3] - rect[1] < 2}
-          onClick={() => void capture()}
-        >
-          {busy ? t("action.working") : t("region.capture")}
-        </Button>
-        <Button size="sm" onClick={onCancel}>
-          {t("action.cancel")}
-        </Button>
-        {error && <span role="alert">{error}</span>}
+        <span className={styles.regionHint}>{t("region.instructions")}</span>
+        <div className={styles.regionButtons}>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={busy || rect[2] - rect[0] < 2 || rect[3] - rect[1] < 2}
+            onClick={() => void capture()}
+          >
+            {busy ? t("action.working") : t("region.capture")}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onCancel}>
+            {t("action.cancel")}
+          </Button>
+        </div>
+        {error && (
+          <span role="alert" className={styles.regionError}>
+            {error}
+          </span>
+        )}
       </div>
     </>
   );

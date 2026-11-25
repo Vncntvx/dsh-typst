@@ -38,7 +38,13 @@ export async function preparePage(
   signal: AbortSignal,
 ): Promise<PreparedPage> {
   const page: PDFPageProxy = await document.getPage(index + 1);
-  signal.throwIfAborted();
+  try {
+    signal.throwIfAborted();
+  } catch (error) {
+    // A late page still holds the engine's operator lists until cleanup.
+    page.cleanup();
+    throw error;
+  }
   const viewport = page.getViewport({ scale: (scale * 96) / 72 });
   const canvas = window.document.createElement("canvas");
   const ratio = Math.min(
@@ -77,6 +83,9 @@ export async function preparePage(
     throw error;
   } finally {
     signal.removeEventListener("abort", cancel);
+    // Release the page's operator lists once the raster and text layer are
+    // committed; pdf.js keeps them in the document's page cache otherwise.
+    page.cleanup();
   }
   let disposed = false;
   return {

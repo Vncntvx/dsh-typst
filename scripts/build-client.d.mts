@@ -1,5 +1,5 @@
 /**
- * Type surface for `scripts/build-client.mjs`, so tests can drive the same
+ * Type surface for `scripts/build-client.mjs`, so callers can drive the same
  * authority and handoff rules the build gates on.
  * @module scripts/build-client
  */
@@ -15,6 +15,9 @@ export declare function verifyBundle(bundlePath?: string): void;
 export declare function clientBuildPlugins(options?: {
   verify?: boolean;
 }): import("esbuild").Plugin[];
+
+/** Every module the bundle leaves to the shell's loader table. */
+export declare const CLIENT_EXTERNALS: readonly string[];
 
 /** Build the browser client bundle once, or keep a watch context alive. */
 export declare function buildClientBundle(options?: {

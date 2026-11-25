@@ -1,0 +1,44 @@
+/* Geometry and the persistent toggled-on dress only: the host Button owns
+ * fill, hover, pressed, focus, disabled and typography. Every selector is
+ * doubled or attribute-keyed so it outranks `Button.module.css`'s `.button`/
+ * `.sm` (0,1,0) and its `.ghost:hover:not(:disabled)` (0,3,0) without
+ * depending on stylesheet injection order — ui-primitives is external to this
+ * bundle and the host injects its CSS separately.
+ *
+ * The selected dress is keyed on the semantic `aria-pressed` attribute, not a
+ * local class, and it re-states itself under hover so a toggled-on control
+ * never loses its fill while the pointer is over it (the host's
+ * `interactive-bg-active` is the persistent/pressed fill, `-hover` is the
+ * transient one). */
+
+.iconButton.iconButton {
+  box-sizing: border-box;
+  position: relative;
+  justify-content: center;
+  flex: none;
+}
+
+.md.md {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--dsw-radius-sm);
+}
+
+.sm.sm {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--dsw-radius-sm);
+}
+
+.iconButton.iconButton[aria-pressed="true"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+@media (hover: hover) {
+  .iconButton.iconButton[aria-pressed="true"]:hover:not(:disabled) {
+    background: var(--dsw-alias-interactive-bg-active);
+  }
+}

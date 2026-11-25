@@ -7,6 +7,8 @@ import type {
 import type {} from "@deepseek-ai/dsh-api-session-controller/client";
 import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
 import type {} from "@deepseek-ai/dsh-client-file-upload/client";
+import type {} from "@deepseek-ai/dsh-client-locale/client";
+import { NS } from "./locales.js";
 import type { FeedbackDraft } from "./types.js";
 
 declare module "@deepseek-ai/dsh-api-session-controller/client" {
@@ -36,6 +38,12 @@ export function createFeedbackBridge(
       requestId: SessionRequestId;
       content: PromptContentPart[];
       signature: string;
+      /** Rolled back by discard on any failed prompt path. */
+      discard: () => void;
+      /** Invoke the panel's acceptance callback at most once. */
+      accept: () => void;
+      /** Resolves when the submission is accepted, even if the RPC lags. */
+      accepted: Promise<void>;
     }
   >();
   return {
@@ -51,7 +59,9 @@ export function createFeedbackBridge(
           );
           if (result !== "applied")
             throw new Error(
-              "The conversation input is busy. Keep this feedback and try again.",
+              ctx.locale === undefined
+                ? "The conversation input is busy. Keep this feedback and try again."
+                : ctx.locale.bind(NS)("feedback.busy"),
             );
           ctx.conversation.input.for(binding.ctx).focus();
         },
@@ -81,7 +91,7 @@ export function createFeedbackBridge(
                 signal,
                 (value) => progress(value.loaded, value.total),
               );
-              if (!result.ok) throw new Error(result.error.message);
+              if (!result.ok) throw result.error;
               content.push({ type: "file", receiptId: result.value.receiptId });
             }
             content.push({ type: "text", text });
@@ -90,6 +100,14 @@ export function createFeedbackBridge(
             const previews = draft.images.map((image) =>
               URL.createObjectURL(image.blob),
             );
+            let acceptedOnce = false;
+            const acceptedSignal = Promise.withResolvers<void>();
+            const accept = (): void => {
+              if (acceptedOnce) return;
+              acceptedOnce = true;
+              accepted();
+              acceptedSignal.resolve();
+            };
             const submission = session.beginSubmission({
               mode: "queue",
               text,
@@ -102,25 +120,58 @@ export function createFeedbackBridge(
                   name: `typst-page-${image.page}.png`,
                 },
               })),
-              onAccept: accepted,
+              onAccept: accept,
               onRetire: () => {
                 previews.forEach((url) => URL.revokeObjectURL(url));
               },
             });
-            attempt = { signature, content, requestId: submission.requestId };
+            attempt = {
+              signature,
+              content,
+              requestId: submission.requestId,
+              accept,
+              accepted: acceptedSignal.promise,
+              discard: () => {
+                previews.forEach((url) => URL.revokeObjectURL(url));
+                // Test doubles and older handles may omit abandon.
+                (submission as { abandon?: () => void }).abandon?.();
+              },
+            };
             attempts.set(draft.id, attempt);
           }
-          const result = await session.prompt(
-            attempt.content,
-            "queue",
-            signal,
-            attempt.requestId,
-          );
-          if (!result.ok) {
+          let result;
+          try {
+            const outcome = await Promise.race([
+              session
+                .prompt(attempt.content, "queue", signal, attempt.requestId)
+                .then((value) => ({ kind: "prompt" as const, value })),
+              attempt.accepted.then(() => ({ kind: "accepted" as const })),
+            ]);
+            if (outcome.kind === "accepted") {
+              // The panel saw acceptance; the prompt RPC may still be in
+              // flight, but this submission is no longer "sending".
+              attempts.delete(draft.id);
+              return;
+            }
+            result = outcome.value;
+          } catch (failure) {
+            // An identified prompt failure retires its echo on the framework
+            // side, but a transport/assembly throw can leave ours registered.
+            // Retire it explicitly: the preview URLs belong to this attempt,
+            // and a retry must mint a fresh request identity instead of
+            // pointing at an echo that has already settled.
+            attempt.discard();
             attempts.delete(draft.id);
-            throw new Error(result.error.message);
+            throw failure;
           }
-          accepted();
+          if (!result.ok) {
+            // A deterministic rejection is final: retire the echo and its
+            // preview URLs instead of leaving them reachable forever.
+            attempt.discard();
+            attempts.delete(draft.id);
+            throw result.error;
+          }
+          attempt.accept();
           attempts.delete(draft.id);
         },
       );

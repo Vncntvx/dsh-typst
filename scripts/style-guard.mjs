@@ -36,6 +36,24 @@
  *    second rule, which is exactly the kind of list that goes stale: the audit
  *    that produced this guard found eight entries naming rules that no longer
  *    animate, and thirteen classes animating with no entry at all.
+ * 8. **Elevated surfaces draw their own stroke.** A menu, popover, panel or
+ *    floating button sets `border: 0` and takes a `--dsw-elevation-*` shadow:
+ *    its 0.5px hairline is the shadow's first layer, not a layout-consuming
+ *    border beside it. A state-coloured border stays a real border.
+ * 9. **Neutral separators are hairlines.** A flat border or separator in a
+ *    neutral `--dsw-alias-border-*` token draws at `0.5px`, which Chromium
+ *    paints as one device pixel. Dashed affordances, state-coloured borders and
+ *    a rail declared in {@link NEUTRAL_BORDER_ACCENTS} keep their full pixel.
+ * 10. **Weight stops at 500.** 600/700 exist for markdown headings, not for UI
+ *    emphasis: a feature sheet's bold label outranked body copy and read as a
+ *    second type system. Emphasis is ink or size, and the ladder's `*-strong-*`
+ *    steps carry the ceiling.
+ * 11. **Controls keep their material.** Feature CSS seats a `Button`, `Input`,
+ *    `Checkbox`, `Tag` or `ZoomControls` (flex, width, margin, inset) and never
+ *    restates its size, padding, fill, ink, border or focus dress — those
+ *    belong to `ui-primitives`, and a local restatement wins or loses against
+ *    it by stylesheet injection order. The two declared exceptions live in the
+ *    control-ownership guard, and icons that are not controls are out of scope.
  *
  * The predicates below are exported and driven by `tests/unit/style-guard` so
  * the guards cannot decay: a parser that stopped matching the form its
@@ -46,6 +64,23 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  baseClassOf,
+  declarationsOf,
+  lineOf,
+  rulesOf,
+  stripComments,
+  subjectClassesOf,
+} from "./shared/css-syntax.mjs";
+import {
+  clientSources,
+  controlStyleViolations,
+} from "./shared/control-style-ownership.mjs";
+
+/* The shared reader stays part of this module's public surface: the unit tests
+   drive `rulesOf`/`declarationsOf` through it, and both guards read a rule the
+   same way. */
+export { declarationsOf, rulesOf, stripComments };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -71,116 +106,56 @@ const SIDES = ["top", "right", "bottom", "left"];
 /** A border thinner than this reads as a tint instead of a mark. */
 const STATE_BORDER_FLOOR = 1;
 
-/**
- * Blank out comment bodies while preserving every offset, so a match position
- * still maps to its real line.
- * @param css - stylesheet source.
- * @returns same-length text with comments replaced by spaces.
- */
-export function stripComments(css) {
-  return css.replace(/\/\*[\s\S]*?\*\//g, (comment) =>
-    comment.replace(/[^\n]/g, " "),
-  );
-}
+/** An elevation token marks a rule as an elevated surface. */
+const ELEVATION_TOKEN = /--dsw-elevation-/;
+
+/** A neutral border token; the state palette stays a real border. */
+const NEUTRAL_BORDER = /--dsw-alias-border-/;
 
 /**
- * The index of the `}` closing the block opened at `open`.
- * @param css - stylesheet source.
- * @param open - index of the `{`.
- * @returns index of the matching `}`, or the text length when unbalanced.
+ * Neutral borders that are deliberately thicker than a hairline because the
+ * border is the mark, not a divider: a quote rail (the bar states "this is
+ * quoted copy") or an emphasis rule. A thicker neutral border anywhere else
+ * reads heavier than the surface it separates, and the difference doubles on a
+ * 2x screen. Declaring an entry here is the only way to opt out; the guard
+ * refuses an undeclared rail instead of silently widening the rule.
  */
-function closingBraceOf(css, open) {
-  let depth = 0;
-  for (let i = open; i < css.length; i += 1) {
-    if (css[i] === "{") depth += 1;
-    else if (css[i] === "}") {
-      depth -= 1;
-      if (depth === 0) return i;
-    }
-  }
-  return css.length;
-}
+export const NEUTRAL_BORDER_ACCENTS = [
+  {
+    file: "src/client/preview.module.css",
+    selector: ".annotationQuote",
+    reason: "a quote rail inside an annotation card: the bar is the mark",
+  },
+  {
+    file: "src/client/preview.module.css",
+    selector: ".feedback blockquote",
+    reason: "a quote rail inside the feedback draft: the bar is the mark",
+  },
+];
+
+/** A state-colour token, which is exempt from the neutral hairline rule. */
+const STATE_COLOR = /--dsw-alias-state-/;
+
+/** The width a neutral flat border or separator draws at. */
+const NEUTRAL_HAIRLINE = 0.5;
 
 /**
- * Every style rule in a stylesheet, flattening nested at-rules.
- *
- * A rule knows the at-rule preludes it sits under, which is what the hover and
- * focus-zoom exceptions are written against. At-rule blocks are recursed into,
- * so a rule inside `@media` is reported like any other; `@keyframes` steps fall
- * out as selectors (`from`, `40%`), and no guard reads them.
- * @param css - stylesheet source, comments already stripped.
- * @returns the rules, in source order.
+ * Whether a declaration names a border that can carry a neutral border token:
+ * `border`, `border-width`, `border-color`, a physical/logical side shorthand,
+ * or a `-width`/`-color` long hand. `border-radius`, `border-style`,
+ * `border-spacing` and `border-collapse` set no edge and are not borders in the
+ * sense these two guards read.
+ * @param property - the lower-cased property name.
+ * @returns true when the property paints a border edge.
  */
-export function rulesOf(css) {
-  const rules = [];
-  const walk = (start, end, atRules) => {
-    let buffer = "";
-    let preludeAt = -1;
-    let i = start;
-    while (i < end) {
-      const char = css[i];
-      if (char === "}") {
-        buffer = "";
-        preludeAt = -1;
-        i += 1;
-        continue;
-      }
-      if (char === "{") {
-        const close = closingBraceOf(css, i);
-        const prelude = buffer.trim();
-        if (prelude.startsWith("@"))
-          walk(i + 1, Math.min(close, end), [...atRules, prelude]);
-        else
-          rules.push({
-            selector: prelude,
-            body: css.slice(i + 1, close),
-            atRules,
-            at: preludeAt,
-          });
-        buffer = "";
-        preludeAt = -1;
-        i = close + 1;
-        continue;
-      }
-      if (preludeAt === -1) {
-        if (/\s/.test(char)) {
-          i += 1;
-          continue;
-        }
-        preludeAt = i;
-      }
-      buffer += char;
-      i += 1;
-    }
-  };
-  walk(0, css.length, []);
-  return rules;
-}
-
-/**
- * The declarations of one rule body.
- * @param body - the text between a rule's braces.
- * @returns property/value pairs, property lower-cased, value trimmed.
- */
-export function declarationsOf(body) {
-  const declarations = [];
-  const push = (chunk) => {
-    const colon = chunk.indexOf(":");
-    if (colon === -1) return;
-    const property = chunk.slice(0, colon).trim().toLowerCase();
-    const value = chunk.slice(colon + 1).trim();
-    if (property === "" || value === "") return;
-    declarations.push({ property, value });
-  };
-  let buffer = "";
-  for (const char of body) {
-    if (char === ";") {
-      push(buffer);
-      buffer = "";
-    } else buffer += char;
-  }
-  push(buffer);
-  return declarations;
+function isBorderEdge(property) {
+  if (property === "border" || property === "border-width") return true;
+  if (property === "border-color") return true;
+  if (!/^border-/.test(property)) return false;
+  const rest = property.slice("border-".length);
+  const side =
+    "(?:top|right|bottom|left|inline-start|inline-end|block-start|block-end)";
+  return new RegExp(`^${side}(?:-(?:width|color))?$`).test(rest);
 }
 
 /**
@@ -190,25 +165,8 @@ export function declarationsOf(body) {
  * @param text - stylesheet source, or a single value.
  * @returns the referenced names, `--` prefix included.
  */
-export function tokenReferencesOf(text) {
-  return [...text.matchAll(/var\(\s*(--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)].map(
-    (match) => match[1],
-  );
-}
-
-/**
- * The line a source offset falls on.
- * @param css - stylesheet source.
- * @param at - the offset, or `-1` when unknown.
- * @returns the 1-based line number.
- */
-function lineOf(css, at) {
-  if (at < 0) return 0;
-  let line = 1;
-  for (let i = 0; i < at && i < css.length; i += 1)
-    if (css[i] === "\n") line += 1;
-  return line;
-}
+/** One `var(--dsw|dsh|ds-…)` reference; the sole spelling every check uses. */
+const TOKEN_REFERENCE = /var\(\s*(--(?:dsw|dsh|ds)-[a-z0-9-]+)/g;
 
 /**
  * The length in a `border`/`border-width` value, in pixels.
@@ -244,10 +202,14 @@ function sideWidthsOf(declarations) {
         if (stated[side] !== undefined) widths[side] = stated[side];
       continue;
     }
-    const side = SIDES.find(
-      (name) =>
-        property === `border-${name}` || property === `border-${name}-width`,
-    );
+    const side =
+      SIDES.find(
+        (name) =>
+          property === `border-${name}` || property === `border-${name}-width`,
+      ) ??
+      /^border-(inline-start|inline-end|block-start|block-end)(?:-width)?$/.exec(
+        property,
+      )?.[1];
     const width = side === undefined ? undefined : borderWidthOf(value);
     if (side !== undefined && width !== undefined) widths[side] = width;
   }
@@ -287,46 +249,6 @@ function stateSidesOf(declarations) {
 }
 
 /**
- * The class a selector keys on, without its state suffixes.
- *
- * `.badge[data-tone='success']` and `.badge` are the same box; the variant only
- * restates what the base rule already sized, and a border width has to be read
- * across the pair rather than inside each half.
- * @param selector - one selector of a rule's selector list.
- * @returns the base class, or `undefined` when the selector opens with none.
- */
-function baseClassOf(selector) {
-  const match = /^\.([A-Za-z0-9_-]+)/.exec(selector.trim());
-  return match === null ? undefined : `.${match[1]}`;
-}
-
-/**
- * The classes a rule actually styles: the last compound of each selector.
- *
- * `.row:hover .icon` animates `.icon`, not `.row`, so the subject — not the
- * qualifying ancestor — is what the motion guard holds against the reduction
- * list. Pseudo-classes and their arguments are stripped before the names are
- * read, so `.link:not(.x)` yields `.link`.
- * @param selector - a rule's selector list.
- * @returns the subject classes, de-duplicated, in source order.
- */
-function subjectClassesOf(selector) {
-  const subjects = new Set();
-  for (const one of selector.split(",")) {
-    const compound =
-      one
-        .trim()
-        .split(/[\s>+~]+/)
-        .filter(Boolean)
-        .pop() ?? "";
-    const bare = compound.replace(/::?[A-Za-z-]+(\([^)]*\))?/g, "");
-    for (const match of bare.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g))
-      subjects.add(`.${match[1]}`);
-  }
-  return [...subjects];
-}
-
-/**
  * Violations of the token contract: a reference to a name the palette does not
  * publish resolves to nothing, so the declaration silently does nothing.
  * @param source - one stylesheet: its repo-relative path and its source text.
@@ -341,7 +263,7 @@ export function unknownTokenViolations(source, palette) {
     ...(palette.ds ?? []),
   ]);
   const violations = [];
-  for (const match of css.matchAll(/var\(\s*(--(?:dsw|dsh|ds)-[a-z0-9-]+)/g)) {
+  for (const match of css.matchAll(TOKEN_REFERENCE)) {
     if (known.has(match[1])) continue;
     violations.push({
       file: source.file,
@@ -377,6 +299,72 @@ export function bareFontScaleViolations(source) {
         selector: rule.selector,
         detail: `${property}: ${value} is off the typography ladder`,
         fix: "use a --dsw-font-* step (it carries the reader's font-size axis)",
+      });
+    }
+  }
+  return violations;
+}
+
+/** The heaviest weight a UI surface may state; headings own the ladder's own weights. */
+const WEIGHT_CEILING = 500;
+
+/** Keyword weights and their numeric equivalents, as `font-weight` writes them. */
+const WEIGHT_KEYWORDS = new Map([
+  ["normal", 400],
+  ["bold", 700],
+  ["bolder", 700],
+  ["lighter", 300],
+]);
+
+/**
+ * The weight a `font-weight` or `font` shorthand states.
+ * @param property - the lower-cased property name.
+ * @param value - the declaration value.
+ * @returns the numeric weight, or undefined when the value does not state one.
+ */
+function weightOf(property, value) {
+  if (property === "font-weight") {
+    // A weight behind `var()` is the ladder's own business.
+    if (value.includes("var(")) return undefined;
+    const bare = value.trim();
+    if (WEIGHT_KEYWORDS.has(bare)) return WEIGHT_KEYWORDS.get(bare);
+    return /^[1-9]00$/.test(bare) ? Number(bare) : undefined;
+  }
+  // `font` shorthand: weight sits before the size token.
+  const tokens = value.split("/")[0].trim().split(/\s+/);
+  for (const token of tokens) {
+    if (/\d*(\.\d+)?(?:px|rem|em|%)/.test(token)) break;
+    if (WEIGHT_KEYWORDS.has(token)) return WEIGHT_KEYWORDS.get(token);
+    if (/^[1-9]00$/.test(token)) return Number(token);
+  }
+  return undefined;
+}
+
+/**
+ * Violations of the weight ceiling: a UI surface states at most 500.
+ *
+ * A 600/700 declaration does not follow the ladder — the theme keeps its bold
+ * steps for markdown headings — and a single bold label in a panel reads as a
+ * second type system next to 500-weight chrome. The check reads both
+ * `font-weight` and the `font` shorthand, which is how half the weights in a
+ * sheet are actually written.
+ * @param source - one stylesheet.
+ * @returns the violations, empty when every weight stays at or below 500.
+ */
+export function fontWeightViolations(source) {
+  const css = stripComments(source.css);
+  const violations = [];
+  for (const rule of rulesOf(css)) {
+    for (const { property, value } of declarationsOf(rule.body)) {
+      if (property !== "font-weight" && property !== "font") continue;
+      const weight = weightOf(property, value);
+      if (weight === undefined || weight <= WEIGHT_CEILING) continue;
+      violations.push({
+        file: source.file,
+        line: lineOf(css, rule.at),
+        selector: rule.selector,
+        detail: `${property}: ${value} states weight ${weight}`,
+        fix: "state 500 at most; emphasise with ink or size, or use a --dsw-font-*-strong-* step",
       });
     }
   }
@@ -525,6 +513,111 @@ export function stateBorderViolations(source) {
 }
 
 /**
+ * Violations of the elevated-surface contract: a surface that takes an
+ * `--dsw-elevation-*` shadow draws its hairline as the shadow's first layer, so
+ * it sets `border: 0` rather than pairing the shadow with a neutral
+ * `--dsw-alias-border-*` border. A border beside the elevation stroke double
+ * draws the outline and shifts layout by its width. State-coloured borders stay
+ * real borders and are out of scope.
+ * @param source - one stylesheet.
+ * @returns the violations, empty when no elevated rule pairs a neutral border.
+ */
+export function elevatedSurfaceViolations(source) {
+  const css = stripComments(source.css);
+  const violations = [];
+  for (const rule of rulesOf(css)) {
+    const declarations = declarationsOf(rule.body);
+    const elevated = declarations.some(({ value }) =>
+      ELEVATION_TOKEN.test(value),
+    );
+    if (!elevated) continue;
+    for (const { property, value } of declarations) {
+      if (!isBorderEdge(property)) continue;
+      if (!NEUTRAL_BORDER.test(value)) continue;
+      if (STATE_COLOR.test(value)) continue;
+      violations.push({
+        file: source.file,
+        line: lineOf(css, rule.at),
+        selector: rule.selector,
+        detail: `${property}: ${value} pairs a neutral border with an elevation shadow`,
+        fix: "set border: 0 and let the --dsw-elevation-* shadow draw the hairline stroke",
+      });
+    }
+  }
+  return violations;
+}
+
+/**
+ * Violations of the neutral-hairline contract: a flat border or separator in a
+ * neutral `--dsw-alias-border-*` token draws at `0.5px`, the one device pixel
+ * Chromium paints for a hairline. Dashed/dotted affordances and state-coloured
+ * borders keep their full pixel and are out of scope, and so is a rail declared
+ * in {@link NEUTRAL_BORDER_ACCENTS} — a bar that is the mark rather than a
+ * divider between two surfaces. The effective width is
+ * read the way `sideWidthsOf` reads it — a long hand follows a shorthand in
+ * source order, and a variant may inherit a width from the base class it
+ * qualifies — so a `border-color`-only restatement is judged by the width it
+ * actually paints.
+ * @param source - one stylesheet.
+ * @returns the violations, empty when every neutral border is a hairline.
+ */
+export function neutralHairlineViolations(source) {
+  const css = stripComments(source.css);
+  const rules = rulesOf(css);
+  const baseWidths = new Map();
+  for (const rule of rules) {
+    if (rule.selector.includes("[") || rule.selector.includes(":")) continue;
+    const key = baseClassOf(rule.selector);
+    if (key === undefined || baseWidths.has(key)) continue;
+    const widths = sideWidthsOf(declarationsOf(rule.body));
+    if (Object.keys(widths).length > 0) baseWidths.set(key, widths);
+  }
+  const violations = [];
+  for (const rule of rules) {
+    if (
+      NEUTRAL_BORDER_ACCENTS.some(
+        (accent) =>
+          accent.file === source.file &&
+          rule.selector.includes(accent.selector),
+      )
+    ) {
+      continue;
+    }
+    const declarations = declarationsOf(rule.body);
+    const stated = sideWidthsOf(declarations);
+    const inherited = resolveBaseWidths(
+      baseWidths,
+      baseClassOf(rule.selector) ?? "",
+    );
+    for (const { property, value } of declarations) {
+      if (!isBorderEdge(property)) continue;
+      if (!NEUTRAL_BORDER.test(value)) continue;
+      if (STATE_COLOR.test(value)) continue;
+      if (/\b(?:dashed|dotted)\b/.test(value)) continue;
+      const side = /^border-(top|right|bottom|left)(?:-width|-color)?$/.exec(
+        property,
+      )?.[1];
+      const widths =
+        side === undefined ? Object.values(stated) : [stated[side]];
+      const effective = widths.map((width) => width ?? inherited[side]);
+      if (effective.length === 0) effective.push(...Object.values(inherited));
+      for (const width of effective) {
+        if (width === undefined || width === NEUTRAL_HAIRLINE) continue;
+        violations.push({
+          file: source.file,
+          line: lineOf(css, rule.at),
+          selector: rule.selector,
+          detail: `${property}: ${value} states a ${width}px neutral border`,
+          fix: "draw a neutral flat border at 0.5px; dashed affordances and state-coloured borders keep 1px, a decorative rail needs an entry in NEUTRAL_BORDER_ACCENTS",
+        });
+        break;
+      }
+    }
+  }
+  return violations;
+}
+
+/**
  * Violations of the hover gate: an ungated `:hover` sticks after a tap on touch
  * hardware.
  * @param source - one stylesheet.
@@ -599,9 +692,12 @@ export function unreducedMotionViolations(source) {
 export const STYLE_GUARDS = [
   unknownTokenViolations,
   bareFontScaleViolations,
+  fontWeightViolations,
   literalColorViolations,
   fullRoundRadiusViolations,
   stateBorderViolations,
+  elevatedSurfaceViolations,
+  neutralHairlineViolations,
   hoverMediaViolations,
   unreducedMotionViolations,
 ];
@@ -664,12 +760,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const palette = JSON.parse(
     readFileSync(join(root, "tests", "fixtures", "style-tokens.json"), "utf8"),
   );
-  const violations = styleViolations(styleSources(), palette);
+  const styles = styleSources();
+  const sources = clientSources(root);
+  const violations = [
+    ...styleViolations(styles, palette),
+    ...controlStyleViolations(sources, styles),
+  ];
   if (violations.length > 0) {
     console.error(`style-guard: ${violations.length} violation(s)`);
     for (const violation of violations)
       console.error(formatViolation(violation));
     process.exit(1);
   }
-  console.log(`style-guard ok: ${styleSources().length} stylesheets`);
+  console.log(
+    `style-guard ok: ${styles.length} stylesheets, ${sources.length} client sources`,
+  );
 }

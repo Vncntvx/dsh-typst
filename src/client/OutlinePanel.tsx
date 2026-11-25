@@ -1,4 +1,9 @@
-import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
+import {
+  Button,
+  IconChevronDownOutlineRegular,
+  IconChevronRightOutlineRegular,
+} from "@deepseek-ai/dsh-client-ui-primitives";
+import { IconButton } from "./IconButton.js";
 import type { OutlineEntry } from "./pdf/outline.js";
 import type { Translate } from "./types.js";
 import styles from "./preview.module.css";
@@ -36,7 +41,7 @@ export function OutlinePanel({
   });
   if (error)
     return (
-      <div role="alert">
+      <div className={styles.alert} role="alert">
         {error}
         <Button size="sm" onClick={onRetry}>
           {t("action.retry")}
@@ -57,6 +62,9 @@ export function OutlinePanel({
         const target = event.target as HTMLElement;
         const row = target.closest<HTMLElement>("[role=treeitem]");
         if (!row) return;
+        // Enter on an inner button belongs to that button (collapse/expand),
+        // not to the row's navigation action.
+        if (target !== row && target.closest("button") !== null) return;
         const index = visible.findIndex((entry) => entry.id === row.dataset.id);
         const entry = visible[index];
         if (!entry) return;
@@ -102,21 +110,29 @@ export function OutlinePanel({
           data-id={entry.id}
           className={styles.outlineRow}
           role="treeitem"
-          tabIndex={0}
+          tabIndex={entry.id === (active ?? visible[0]?.id) ? 0 : -1}
           aria-level={entry.depth + 1}
           aria-current={entry.id === active ? "location" : undefined}
+          aria-disabled={entry.pageIndex === null ? true : undefined}
           aria-expanded={
             entry.hasChildren ? !collapsed.has(entry.id) : undefined
           }
           style={{ paddingInlineStart: 8 + entry.depth * 12 }}
         >
           {entry.hasChildren && (
-            <Button
+            <IconButton
               size="sm"
-              className={styles.outlineToggle}
+              tabIndex={-1}
               aria-label={t(
                 collapsed.has(entry.id) ? "outline.expand" : "outline.collapse",
               )}
+              icon={
+                collapsed.has(entry.id) ? (
+                  <IconChevronRightOutlineRegular size={16} />
+                ) : (
+                  <IconChevronDownOutlineRegular size={16} />
+                )
+              }
               onClick={() =>
                 setCollapsed((current) => {
                   const next = new Set(current);
@@ -125,12 +141,11 @@ export function OutlinePanel({
                   return next;
                 })
               }
-            >
-              {collapsed.has(entry.id) ? "▸" : "▾"}
-            </Button>
+            />
           )}
           <button
             type="button"
+            tabIndex={-1}
             className={styles.outlineTitleButton}
             disabled={entry.pageIndex === null}
             onClick={() => onNavigate(entry)}

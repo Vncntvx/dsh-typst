@@ -6,11 +6,6 @@ export { workerSource };
 /** Resource kinds PDF.js 6's BinaryDataFactory may request. */
 export type PdfAssetKind = "cMapUrl" | "standardFontDataUrl" | "wasmUrl";
 
-/** Original filenames mapped to base64. */
-export type PdfAssetMap = Readonly<
-  Record<PdfAssetKind, Readonly<Record<string, string>>>
->;
-
 /** Public methods required by PDF.js's BinaryDataFactory option. */
 export interface PdfBinaryDataFactory {
   /** @param request - PDF.js resource kind and exact filename. @returns independent transferable resource bytes. */

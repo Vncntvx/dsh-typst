@@ -99,3 +99,21 @@ This document lists the common problems of using dsh-typst, their likely causes 
 - **Symptom**: the right sidebar has no Typst entry.
 - **Cause**: the plugin is not enabled, or the host UI has no right docking sidebar.
 - **Fix**: confirm **dsh-typst** is enabled in the plugin manager; the UI has to be the web build with the right sidebar. The guide page opens the panel as well.
+
+## 17. Glyphs are missing from the preview
+
+- **Symptom**: the document compiles, but some text renders blank or as boxes.
+- **Cause**: the font is not installed, or it lives in a directory typst does not search. typst only discovers system fonts and the `--font-path` directories it is given.
+- **Fix**: install the font, or put it in the workspace's `fonts/` or `assets/fonts/`, or add its directory under **Font directories** in the plugin settings. A setting may start with `~/` — the plugin expands your home directory; `~\` works on Windows too.
+
+## 18. A @preview or @local package cannot be found
+
+- **Symptom**: the compile reports `package not found`, or a private `@local` package does not resolve.
+- **Cause**: the first `@preview` download failed (intranet, proxy or offline), or the private package is not in typst's default local package directory.
+- **Fix**: set **Package directory** in the plugin settings; it is passed to typst as `--package-path`. Place `@local` packages as `<package-dir>/local/<name>/<version>`; an offline mirror keeps `preview` packages under the same layout.
+
+## 19. Generated directories show up as main-file candidates
+
+- **Symptom**: the main-file picker lists `.typ` files under `vendor/` or `generated/`, or the plugin guesses a main file among them.
+- **Cause**: by default only `node_modules`, `target`, `__pycache__`, `venv`, `build`, `dist` and hidden directories are skipped; every other directory is scanned.
+- **Fix**: add the directory names under **Excluded directories** in the plugin settings — names only, no paths; they match at any depth and without case. Exclusion affects discovery only; `#include` and explicitly selected main files still work.

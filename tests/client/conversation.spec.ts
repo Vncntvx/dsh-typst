@@ -5,7 +5,10 @@ import { createFeedbackBridge } from "../../src/client/conversation.js";
 import type { FeedbackDraft } from "../../src/client/types.js";
 function fixture() {
   const session = {
-    beginSubmission: vi.fn(() => ({ requestId: "request-1" })),
+    beginSubmission: vi.fn((_options?: { onAccept?: () => void }) => ({
+      requestId: "request-1",
+      abandon: vi.fn(),
+    })),
     prompt: vi.fn(async (..._args: unknown[]) => ({
       ok: true,
       value: { accepted: true },
@@ -123,10 +126,43 @@ it("uploads a real region image and submits its receipt with the editable reques
   );
   expect(accepted).toHaveBeenCalled();
 });
-it("reuses the request identity after an uncertain transport failure", async () => {
+it("accepts at most once when the submission and the prompt both accept", async () => {
   const f = fixture();
+  f.session.beginSubmission.mockImplementation((options: unknown) => {
+    (options as { onAccept: () => void }).onAccept();
+    return { requestId: "request-1", abandon: vi.fn() };
+  });
+  const accepted = vi.fn();
+  await f.bridge.submit(
+    draft(),
+    "question",
+    new AbortController().signal,
+    vi.fn(),
+    accepted,
+  );
+  expect(accepted).toHaveBeenCalledTimes(1);
+});
+it("retires the echo and its preview URLs after an uncertain prompt failure", async () => {
+  const f = fixture();
+  const abandon = vi.fn();
+  const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  f.session.beginSubmission.mockReturnValue({
+    requestId: "request-1",
+    abandon,
+  });
   f.session.prompt.mockRejectedValueOnce(new Error("disconnected"));
   const value = draft();
+  value.images.push({
+    id: "region",
+    blob: new Blob(["image"], { type: "image/png" }),
+    url: "blob:preview",
+    page: 1,
+    rect: [1, 2, 3, 4],
+    width: 30,
+    height: 20,
+    identity: { generation: 1, seq: 1, sha256: "hash" },
+    main: "main.typ",
+  });
   await expect(
     f.bridge.submit(
       value,
@@ -136,6 +172,9 @@ it("reuses the request identity after an uncertain transport failure", async () 
       vi.fn(),
     ),
   ).rejects.toThrow("disconnected");
+  expect(abandon).toHaveBeenCalledTimes(1);
+  expect(revoke).toHaveBeenCalledTimes(1);
+  // A retry starts from a fresh echo rather than a stale request identity.
   await f.bridge.submit(
     value,
     "question",
@@ -143,11 +182,12 @@ it("reuses the request identity after an uncertain transport failure", async () 
     vi.fn(),
     vi.fn(),
   );
-  expect(f.session.beginSubmission).toHaveBeenCalledTimes(1);
+  expect(f.session.beginSubmission).toHaveBeenCalledTimes(2);
   expect(f.session.prompt.mock.calls.map((call) => call[3])).toEqual([
     "request-1",
     "request-1",
   ]);
+  revoke.mockRestore();
 });
 it("coalesces repeated submits while admission is pending", async () => {
   const f = fixture();

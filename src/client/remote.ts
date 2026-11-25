@@ -17,24 +17,16 @@ import type {
 } from "@deepseek-ai/dsh-typert-protocol";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
 import type {
+  DiscoveryView,
   PreviewBytes,
   PreviewIdentity,
   SourceMatch,
   TypstStateFrame,
 } from "../contract.js";
 import { TYPST_INVOCATIONS_CLIENT } from "./status-codec.js";
+import { TYPST_REMOTE_PACKAGE } from "../constants.js";
 
-export type {
-  PreviewIdentity,
-  SourceMatch,
-  TypstStateFrame,
-} from "../contract.js";
-
-/** The client's view of one preview read (the shared wire type). */
-export type PreviewBytesView = PreviewBytes;
-
-/**
- * The mounted `typst` namespace face (available after `$mount` + inject on
+/** The mounted `typst` namespace face (available after `$mount` + inject on
  * the consuming fiber). The declare-module block below merges it into the
  * protocol's namespace map under the wire's name.
  */
@@ -56,25 +48,31 @@ export interface TypstNamespace {
     typstScopeId: SessionId,
     identity: PreviewIdentity,
     signal?: AbortSignal,
-  ) => Promise<RemoteResult<PreviewBytesView>>;
+  ) => Promise<RemoteResult<PreviewBytes>>;
   locateSource: (
     typstScopeId: SessionId,
     text: string,
     focus: string | null,
     signal?: AbortSignal,
   ) => Promise<RemoteResult<{ matches: SourceMatch[] }>>;
-  recheck: (typstScopeId: SessionId) => Promise<RemoteResult<TypstStateFrame>>;
-  restart: (typstScopeId: SessionId) => Promise<RemoteResult<TypstStateFrame>>;
+  recheck: (
+    typstScopeId: SessionId,
+    signal?: AbortSignal,
+  ) => Promise<RemoteResult<TypstStateFrame>>;
+  restart: (
+    typstScopeId: SessionId,
+    signal?: AbortSignal,
+  ) => Promise<RemoteResult<TypstStateFrame>>;
   discover: (
     typstScopeId: SessionId,
     includeExcluded: boolean,
     signal?: AbortSignal,
-  ) => Promise<RemoteResult<object>>;
+  ) => Promise<RemoteResult<DiscoveryView>>;
 }
 
 /** The `typst` namespace's client contribution. */
 export const TYPST_REMOTE: TypertRemoteContribution = {
-  package: "typst",
+  package: TYPST_REMOTE_PACKAGE,
   descriptors: TYPST_INVOCATIONS_CLIENT,
 };
 

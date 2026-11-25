@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -9,8 +10,9 @@ import {
 import { afterEach, expect, it, vi } from "vitest";
 import { en } from "../../src/client/locales.js";
 import { frame } from "./helpers/frame.js";
-import { PreviewViewRegistry } from "../../src/client/view-state.js";
+import { createPreviewStore } from "../../src/client/view-state.js";
 import type { PreviewTabProps } from "../../src/client/PreviewTab.js";
+import { hookOf } from "./helpers/use-store.js";
 const f = vi.hoisted(() => ({
   navigate: vi.fn(),
   highlight: vi.fn(),
@@ -49,23 +51,46 @@ function fixture() {
     failure: undefined,
   }));
   const openResource = vi.fn();
+  const instance = createPreviewStore().create("session");
+  const useStore = hookOf(instance);
+  const controller = new AbortController();
+  const refresh = { current: () => {} };
   const props = {
     sessionId: "session",
     t: (key: keyof typeof en) => en[key],
-    views: new PreviewViewRegistry(),
+    useStore,
+    actions: instance.actions,
     bridge: { append: vi.fn(), submit: vi.fn() },
-    remote: { status: vi.fn(async () => ({ ok: true, value })) },
+    remote: {
+      status: vi.fn(async () => ({ ok: true, value })),
+      recheck: vi.fn(async () => ({ ok: true, value })),
+      restart: vi.fn(async () => ({ ok: true, value })),
+    },
     useResource,
     useTabInfo: () => ({
       tab: {
         id: "tab",
         contentId: "typst",
-        signal: new AbortController().signal,
-        actions: { bindCommands: () => () => {}, openResource },
+        signal: controller.signal,
+        actions: {
+          bindCommands: (commands: { refresh: () => void }) => {
+            refresh.current = commands.refresh;
+            return () => {};
+          },
+          openResource,
+        },
       },
     }),
   } as unknown as PreviewTabProps;
-  return { value, props, useResource, openResource };
+  return {
+    value,
+    props,
+    instance,
+    useResource,
+    openResource,
+    controller,
+    refresh,
+  };
 }
 it("notifies for an Agent page request and navigates only after a click", async () => {
   const a = fixture();
@@ -74,11 +99,11 @@ it("notifies for an Agent page request and navigates only after a click", async 
   render(<PreviewTab {...a.props} />);
   await screen.findByText("Agent shared a preview location");
   expect(f.navigate).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "View location" }));
+  fireEvent.click(screen.getByRole("button", { name: /View location/ }));
   expect(f.navigate).toHaveBeenCalledWith(1);
   expect(screen.queryByText("Agent shared a preview location")).toBeNull();
 });
-it("reconnects failed resources through a new subscription while preserving the last frame", async () => {
+it("reconnects in place without minting a new subscription address", async () => {
   const a = fixture();
   a.useResource.mockReturnValue({
     status: "failed",
@@ -89,8 +114,24 @@ it("reconnects failed resources through a new subscription while preserving the 
   expect(screen.getByRole("alert").textContent).toContain("disconnected");
   const first = a.useResource.mock.calls.at(-1);
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-  await waitFor(() =>
-    expect(a.useResource.mock.calls.at(-1)).not.toEqual(first),
-  );
-  expect(screen.getByText("Reading area")).toBeDefined();
+  await waitFor(() => expect(screen.getByText("Reading area")).toBeDefined());
+  expect(a.useResource.mock.calls.at(-1)).toEqual(first);
+});
+
+it("drops a hidden tab on close and ignores the result of its pending refresh", async () => {
+  const a = fixture();
+  const pending = Promise.withResolvers<{
+    ok: false;
+    error: { message: string };
+  }>();
+  vi.mocked(a.props.remote.restart).mockReturnValue(pending.promise as never);
+  const rendered = render(<PreviewTab {...a.props} />);
+  act(a.refresh.current);
+  rendered.unmount();
+  expect(a.instance.getSnapshot().byTab.tab).toBeDefined();
+  a.controller.abort();
+  expect(a.instance.getSnapshot().byTab.tab).toBeUndefined();
+  pending.resolve({ ok: false, error: { message: "Refresh failed" } });
+  await pending.promise;
+  expect(a.instance.getSnapshot().byTab.tab).toBeUndefined();
 });

@@ -29,23 +29,29 @@ export async function resolveOutline(
   ): Promise<void> {
     for (const [index, node] of nodes.entries()) {
       const id = `${parentId ?? "root"}/${index}`;
-      let destination =
-        typeof node.dest === "string"
-          ? await document.getDestination(node.dest)
-          : node.dest;
+      let destination: readonly unknown[] | null =
+        typeof node.dest === "string" ? null : node.dest;
       let pageIndex: number | null = null;
-      if (Array.isArray(destination) && destination.length > 0) {
-        const first = destination[0];
-        pageIndex =
-          typeof first === "number"
-            ? first
-            : await document.getPageIndex(first);
-        if (
-          pageIndex !== null &&
-          (!Number.isInteger(pageIndex) || pageIndex < 0)
-        )
-          pageIndex = null;
-      } else destination = null;
+      try {
+        if (typeof node.dest === "string")
+          destination = await document.getDestination(node.dest);
+        if (Array.isArray(destination) && destination.length > 0) {
+          const first = destination[0];
+          pageIndex =
+            typeof first === "number"
+              ? first
+              : await document.getPageIndex(first);
+          if (
+            pageIndex !== null &&
+            (!Number.isInteger(pageIndex) || pageIndex < 0)
+          )
+            pageIndex = null;
+        } else destination = null;
+      } catch {
+        // A malformed bookmark must not discard the rest of the outline.
+        destination = null;
+        pageIndex = null;
+      }
       entries.push({
         id,
         title: node.title,

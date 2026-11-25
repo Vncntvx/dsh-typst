@@ -1,0 +1,45 @@
+/* The harness clickable-link language applied to an inline action: link blue
+ * ink at rest, weight 500, dotted underline with a 3px offset on hover and
+ * keyboard focus, and the standard focus ring. Mirrors the host's own
+ * artifact links (markdown anchors, produced-file chips); the host has no
+ * link-button primitive, so this plain button owns its own geometry. */
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-link);
+  /* The strong rung carries the 500 weight and its line height in one
+     declaration, so the link never states a weight the ladder does not. */
+  font: var(--dsw-font-xxs-strong-12);
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.link:focus-visible {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  outline: var(--dsw-focus-ring-width) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+
+.link:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: none;
+  cursor: default;
+}
+
+@media (hover: hover) {
+  .link:hover:not(:disabled) {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
+}

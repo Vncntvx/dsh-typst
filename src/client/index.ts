@@ -7,7 +7,9 @@
  * every declared name resolves, and this plugin is what creates that
  * namespace. The namespace is declared by the UI fiber instead
  * (`ctx.inject(['remote.typst', …], registerUi)`), the official consumer
- * form (`docs/cookbook/adding-a-remote-api.md`).
+ * form in the `@deepseek-ai/dsh` package's
+ * `docs/cookbook/extension-cookbook.md` ("An external protocol driver") and
+ * `docs/subsystems/typert.md`.
  * @module dsh-typst/client
  */
 
@@ -24,18 +26,28 @@ import type {} from "@deepseek-ai/dsh-client-resources/client";
 // owning package) must be in the program for the tab registration to type.
 import type {} from "@deepseek-ai/dsh-client-ui-sidebar-right/client";
 import type {} from "@deepseek-ai/dsh-client-ui-tool/client";
+// Type-only: the `configForms` service and the plugin manager's
+// `plugins.bundle.config` slot row must be in the program for the settings
+// page registration to type. Neither package is imported for value at runtime.
+import type {} from "@deepseek-ai/dsh-client-ui-settings/client";
+import type {} from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
 import { en, NS, zh } from "./locales.js";
 import { TYPST_REMOTE, type TypstNamespace } from "./remote.js";
 import { registerTypstResource } from "./provider.js";
-import { PreviewViewRegistry } from "./view-state.js";
+import { createPreviewStore } from "./view-state.js";
 import { createFeedbackBridge } from "./conversation.js";
 import type {} from "@deepseek-ai/dsh-api-session-controller/client";
 import type {} from "@deepseek-ai/dsh-client-ui-conversation/client";
 import type {} from "@deepseek-ai/dsh-client-file-upload/client";
 import { PreviewTab, type PreviewTabInjected } from "./PreviewTab.js";
+import { TypstGlyph } from "./TypstGlyph.js";
+import { TypstSettingsController, TypstSettingsPage } from "./settings.js";
 import { TOOLVIEW_REGISTRATIONS } from "./toolviews.js";
-import { TYPST_TOOL_NAMES } from "../constants.js";
+import {
+  TYPST_REMOTE_PACKAGE,
+  TYPST_SETTINGS_NAMESPACE,
+} from "../constants.js";
 
 /** The tab implementation id: the key the body registers under. */
 const TAB_ID = "dsh-typst/preview";
@@ -44,9 +56,7 @@ export const inject = [
   "locale",
   "slots",
   "remote",
-  "remoteAccess",
   "resources",
-  "sidebarRight",
   "sidebarRightTabs",
   "sessions",
   "conversation",
@@ -60,12 +70,56 @@ export const inject = [
  */
 export async function apply(ctx: ClientContext): Promise<void> {
   ctx.effect(() => ctx.locale.register(NS, { en, zh }), "dsh-typst: locale");
+  // The settings page is optional: a deployment without the shared settings
+  // UI keeps the preview and the tools, and the page appears when the service
+  // arrives.
+  void ctx.inject(["configForms"], (settings) => {
+    registerSettingsPage(settings);
+  });
   await ctx.remote.$mount(TYPST_REMOTE);
-  ctx.inject(["remote.typst"], (ui) => {
+  await ctx.inject(["remote.typst"], (ui) => {
     registerTypstResource(ui);
     registerPreviewTab(ui);
     registerToolviews(ui);
   });
+}
+
+/**
+ * Register the plugin's settings page on the bundle's page in the plugin
+ * manager. The controller lives with this registration: it subscribes to the
+ * shared `typst` config form and is disposed when the fiber unwinds.
+ * @param ctx - the browser plugin context.
+ */
+function registerSettingsPage(ctx: ClientContext): void {
+  ctx.effect(
+    () =>
+      // Follow the namespace the Host actually serves: no page when the
+      // profile entry is absent, and a fresh controller after a reload.
+      ctx.configForms.whileServed([TYPST_SETTINGS_NAMESPACE], () => {
+        const controller = new TypstSettingsController(
+          ctx.configForms.get<Record<string, unknown>>(
+            TYPST_SETTINGS_NAMESPACE,
+          ),
+        );
+        const unregister = ctx.slots.inject("plugins.bundle.config", () =>
+          ctx.slots.register(
+            {
+              name: "plugins.bundle.config",
+              key: TYPST_REMOTE_PACKAGE,
+              locale: NS,
+              registrant: TYPST_REMOTE_PACKAGE,
+              inject: () => controller.inject(),
+            },
+            TypstSettingsPage,
+          ),
+        );
+        return () => {
+          unregister();
+          controller.dispose();
+        };
+      }),
+    "dsh-typst: settings page",
+  );
 }
 
 /**
@@ -75,15 +129,8 @@ export async function apply(ctx: ClientContext): Promise<void> {
  */
 function registerPreviewTab(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS);
-  const views = new PreviewViewRegistry();
   const bridges = new Map<string, ReturnType<typeof createFeedbackBridge>>();
-  ctx.effect(
-    () => () => {
-      views.dispose();
-      bridges.clear();
-    },
-    "typst: resident view state",
-  );
+  ctx.effect(() => () => bridges.clear(), "typst: feedback bridges");
   ctx.effect(
     () =>
       ctx.sidebarRightTabs.register({
@@ -97,6 +144,7 @@ function registerPreviewTab(ctx: ClientContext): void {
             order: 40,
             title: () => t("tab.title"),
             description: () => t("tab.description"),
+            icon: TypstGlyph,
           },
         ],
       }),
@@ -110,6 +158,10 @@ function registerPreviewTab(ctx: ClientContext): void {
             name: "sidebar.right.pane.tab",
             key: TAB_ID,
             locale: NS,
+            // Exclusive store: the framework owns one instance per session,
+            // disposes it with the registration, and injects the selector
+            // hook plus the baked action set into the body.
+            store: createPreviewStore(),
             inject: (sessionId: SessionId): PreviewTabInjected => {
               let bridge = bridges.get(sessionId);
               if (!bridge)
@@ -118,7 +170,6 @@ function registerPreviewTab(ctx: ClientContext): void {
                   (bridge = createFeedbackBridge(ctx, sessionId as SessionId)),
                 );
               return {
-                views,
                 bridge,
                 remote: ctx.remote.typst as TypstNamespace,
               };
@@ -152,5 +203,3 @@ function registerToolviews(ctx: ClientContext): void {
     }
   });
 }
-
-export { TYPST_TOOL_NAMES };

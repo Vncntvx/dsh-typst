@@ -1,9 +1,15 @@
 {
   "meta": {
     "title": "dsh-typst",
-    "description": "Typst plugin for DeepSeek Harness: a live preview right-sidebar panel driven by the user's own typst, with agent tools that check errors, look at rendered pages, point at places in the preview, and export PDFs.",
+    "description": "Typst plugin for DeepSeek Harness. It previews the document you are working on in the right sidebar, compiled by your own Typst, and gives the agent tools to check errors, inspect rendered pages, point at places in the preview, and export PDFs.",
     "detail": "docs/plugin-detail.en.md"
   },
   "typstPath": "Typst path",
-  "typstPathHint": "Optional. Full path of the typst executable. By default it is looked up on PATH and in common install locations; set it only when Typst is installed elsewhere."
+  "typstPathHint": "Optional. Path to the typst executable, absolute or relative to the workspace. Leave empty to search PATH, the usual install locations and your login shell. Set it only when Typst is installed somewhere else.",
+  "fontPaths": "Font directories",
+  "fontPathsHint": "Optional. Extra font directories, read after the workspace's fonts/ and assets/fonts/. Separate entries with commas and wrap a path that contains a comma in double quotes. A leading ~ means your home directory.",
+  "packagePath": "Package directory",
+  "packagePathHint": "Optional. Directory typst reads packages from (--package-path): your own @local packages, or an offline mirror of @preview. Leave empty to use typst's default location.",
+  "excludeDirs": "Excluded directories",
+  "excludeDirsHint": "Optional. Directory names skipped when scanning for the main file, at any depth and regardless of case. Names only, no paths, separated by commas. These join the built-in skips: node_modules, target, __pycache__, venv, build, dist."
 }

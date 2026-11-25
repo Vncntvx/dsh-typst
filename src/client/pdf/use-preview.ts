@@ -3,12 +3,14 @@ import type { SnapshotView } from "../../contract.js";
 import type { TypstNamespace } from "../remote.js";
 import type { PdfSession, PdfDocument } from "./document.js";
 import { openPdf } from "./runtime.js";
+import { PageSizeCache } from "./page-size.js";
 import { preparePage, type PreparedPage } from "./page.js";
 import { errorText, identityKey } from "../types.js";
 
 export interface LoadedPreview {
   session: PdfSession;
   document: PdfDocument;
+  sizes: PageSizeCache;
   snapshot: SnapshotView;
   seed: PreparedPage | null;
   seedIndex: number;
@@ -32,6 +34,7 @@ export function usePreview(
       const old = current.current;
       current.current = null;
       setLoaded(null);
+      setError(null);
       old?.seed?.dispose();
       void old?.session.dispose();
       return;
@@ -58,17 +61,38 @@ export function usePreview(
           "The preview response does not match the requested document.",
         );
       candidate = openPdf(result.value.data, controller.signal, (failure) => {
-        if (!controller.signal.aborted) setError(failure.message);
+        if (controller.signal.aborted) return;
+        // A worker crash invalidates the whole document; clear the loaded
+        // session so the reader offers one retry instead of per-page errors.
+        setError(failure.message);
+        setLoaded(null);
+        current.current = null;
       });
       const document = await candidate.document;
       const seedIndex = Math.min(target, document.numPages - 1);
       seed = await preparePage(document, seedIndex, scale, controller.signal);
       controller.signal.throwIfAborted();
-      const next = { session: candidate, document, snapshot, seed, seedIndex };
+      const next: LoadedPreview = {
+        session: candidate,
+        document,
+        sizes: new PageSizeCache(document),
+        snapshot,
+        seed,
+        seedIndex,
+      };
       const previous = current.current;
       current.current = next;
       committed = true;
       setLoaded(next);
+      // A seed page nobody mounts within a moment must not hold a full-page
+      // canvas for the whole document lifetime; the page renders on demand
+      // after this release.
+      setTimeout(() => {
+        if (current.current === next && next.seed !== null) {
+          next.seed.dispose();
+          next.seed = null;
+        }
+      }, 1_000);
       // React commits the replacement before the prior document's resources are retired.
       if (previous) retired.current.push(previous);
     })().catch((failure) => {

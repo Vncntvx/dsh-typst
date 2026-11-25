@@ -17,8 +17,9 @@
  * - `src/client/**`: the browser half.
  * - Shared pure surfaces both halves already use: wire identity
  *   (`contract`), the runtime constants module (`constants`, which only
- *   carries values and type-only imports), and the wire boundary schemas
- *   (`wire-schemas`) both codec arms materialize.
+ *   carries values and type-only imports), the wire boundary schemas
+ *   (`wire-schemas`) both codec arms materialize, and the diagnostic text
+ *   formatter (`diagnostic-text`) shared by host tools and panel feedback.
  *
  * Host codecs, the Typert manifest, the host Remote service, the watcher,
  * tools, and the process spawn stack must never enter this graph. A new
@@ -26,7 +27,7 @@
  * authority.
  */
 export const CLIENT_SAFE_LOCAL =
-  /^src\/(?:client(?:\/|$)|contract\.(?:ts|js|mjs|cjs)$|constants\.(?:ts|js|mjs|cjs)$|wire-schemas\.(?:ts|js|mjs|cjs)$)/;
+  /^src\/(?:client(?:\/|$)|contract\.(?:ts|js|mjs|cjs)$|constants\.(?:ts|js|mjs|cjs)$|wire-schemas\.(?:ts|js|mjs|cjs)$|diagnostic-text\.(?:ts|js|mjs|cjs)$)/;
 
 /**
  * Packages the host half owns. Boundary schema materialization (schemastery
@@ -73,7 +74,7 @@ export function packageNameOf(key) {
 
 /**
  * Harness specifiers a client bundle may **inline**. Counterpart of the three
- * constants in `packages/client/tsdown.client.ts` at **dsh-v0.2.2-rc.1**:
+ * constants in `packages/client/tsdown.client.ts` at **dsh-v0.2.2-rc.5**:
  * `INLINE_SAFE`, `GENERATED_REMOTE`, `VENDORED_LIBRARY`. Keep this table in
  * step with that file: never invent a fourth arm here.
  *

@@ -1,3 +1,48 @@
+/* Design language: this sheet consumes the host's semantics instead of
+ * inventing a second one, so a change can be argued against intent rather
+ * than taste.
+ *
+ * Colour. `label-primary` is body ink, `label-secondary` supporting copy,
+ * `label-tertiary` hints and empty states, `label-caption` placeholder ink,
+ * `label-on-color` ink over a saturated fill, `link` only clickable text.
+ * Selection and "current" take the business accent (`state-business-primary`
+ * rails and marks), never `link`; transient and persistent fills are
+ * `interactive-bg-hover` / `-active`.
+ *
+ * Structure. `border-l1` is the hairline inside an elevated surface,
+ * `border-l2` a structural divider or a card stroke, `border-l3` a compact
+ * control edge, `border-l4` a standard field edge. Neutral strokes draw at
+ * 0.5px; 1px belongs to state borders and dashed affordances.
+ *
+ * Surfaces. Panel and cards sit on `bg-layer-1`, raised rows and drawers on
+ * `bg-layer-2`, the stage on `bg-document-preview`. Floating chrome takes
+ * `elevation-panel`; temporary mode surfaces and portals take
+ * `elevation-prominent`; every elevated surface sets `border: 0` and rebinds
+ * `--dsw-elevation-stroke-color` when it is not the default field tier.
+ *
+ * Spacing. Distance expresses grouping: 2/4 inside a cluster, 8 between peers,
+ * 12/16 between regions, and peers on one axis share an inset (a row's text
+ * starts where the row above starts). Padding and gaps keep the 4px rhythm;
+ * 3px survives only as a host search band's optical padding and a 3px
+ * underline offset.
+ *
+ * Type. Sizes come from the ladder: 13 for rows and detail, 12 for meta, 11
+ * only inside a badge, 14 for prose; strong variants cap at weight 500. A
+ * control's typography belongs to the control.
+ *
+ * State. Hover exists only under `(hover: hover)`; a selected control keeps
+ * its fill while hovered; `disabled` is the host's 0.4 fade or tertiary ink,
+ * never a fifth colour; every focusable control shows the focus ring; every
+ * animated declaration is reduced under `prefers-reduced-motion`.
+ *
+ * Controls (`Button`, `Input`, `Checkbox`, `Tag`, `ZoomControls`) keep the
+ * host's material and this sheet only seats them (flex, width, margin, inset).
+ * Two exceptions are explicit and machine-declared: `IconButton.module.css`
+ * owns icon geometry and the `aria-pressed` dress, `LinkButton.module.css`
+ * owns the clickable-link family, and `.pagebar .zoom` is a declared
+ * composition that inlines the floating zoom panel.
+ * `scripts/shared/control-style-ownership.mjs` enforces the split. */
+
 .root {
   display: flex;
   flex-direction: column;
@@ -12,17 +57,42 @@
   container-type: inline-size;
 }
 
-/* DSH Standard 38px Header */
+/* Panel-level native selects (the severity filter, the feedback source
+   picker) share the harness standard field: H32, R12, the type ladder's 13px
+   step and the field edge l4 — the same tier as the host `Input`, so a select
+   and a text field beside it weigh the same. The reader's compact selects
+   drop to l3 further down, the compact control edge. */
+.root select {
+  height: 32px;
+  padding: 0 8px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.root select:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+/* DSH standard 38px header. It is a min-height, not a fixed height: the
+   header holds a 28px control and the 14px type step, so a fixed 38px clips
+   both once the reader's font-size axis grows. 4px vertical padding keeps the
+   control optically centred at the default size and lets the bar grow. The
+   seam is the structural divider (l2), not the inner hairline (l1). */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   box-sizing: border-box;
-  height: 38px;
-  padding: 0 8px 0 12px;
+  min-height: 38px;
+  padding: 4px 8px 4px 12px;
   flex: none;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-1);
 }
 
@@ -47,46 +117,36 @@
   flex: 0 0 auto;
 }
 
-/* Square seat for the header's native compact icon buttons. */
-.headerTool {
-  position: relative;
-  flex: none;
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  padding: 0;
-}
-
-.headerToolActive {
-  color: var(--dsw-alias-link);
-  background: var(--dsw-alias-interactive-bg-active);
-}
-
+/* The header's icon controls are the local `IconButton` adapter: geometry
+   belongs there, the host Button owns ink and interaction. No seat class is
+   needed here; the adapter is positioned so this badge can anchor to it.
+   The badge is a count, not a second action: it takes the error fill, the
+   on-colour ink, the full-round pairing (50% + corner-shape round) so a
+   two-digit count stays a pill, and the 11px strong step that fits inside a
+   16px pill. */
 .auxBadge {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  min-width: 14px;
-  padding: 0 2px;
+  top: 1px;
+  right: 1px;
+  display: grid;
+  place-items: center;
   box-sizing: border-box;
-  border-radius: var(--dsw-radius-xs);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  corner-shape: round;
   background: var(--dsw-alias-state-error-primary);
-  color: var(--dsw-alias-brand-primary-invert);
-  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-on-color);
+  font: var(--dsw-font-xxxs-strong-11);
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
-.statusButton {
-  display: inline-flex;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  border-radius: var(--dsw-radius-sm);
-}
-
+/* The status chip is the content of a host Button when it opens the
+   problems panel, so hover, pressed and focus come from the control; the tag
+   itself only opts out of text selection and lines its digits up. */
 .statusTag {
-  cursor: pointer;
   user-select: none;
 }
 
@@ -97,11 +157,11 @@
   max-width: 100%;
 }
 
+/* Seat only: the trigger is a host Button, so its padding, gap and ink are
+   the control's. The seat keeps the chip inside the header. */
 .mainFileTrigger {
   min-width: 0;
   max-width: 100%;
-  padding: 0 4px 0 8px;
-  gap: 6px;
 }
 
 .mainFileLabel {
@@ -111,81 +171,176 @@
   white-space: nowrap;
 }
 
+/* The chevron and the file name are one value, so they share one ink role;
+   a muted chevron beside primary text is the icon/label mismatch the review
+   calls out. The open state only rotates the seat. */
 .mainFileChevron {
   flex: none;
-  color: var(--dsw-alias-label-caption);
 }
 
 .mainFileChevronOpen {
   transform: rotate(180deg);
 }
 
-/* Card inside the harness menu's viewport: the menu's readable bound is
-   narrower than its max-width, so the footer's form never overflows the card.
-   Material, radius, row geometry and dismissal all come from the primitive. */
+/* The card is a portaled MenuSurface: the primitive owns its material and
+   outer radius, this class owns layout and elevation (web-styling.md
+   component rules: elevated surfaces set border 0 and take an elevation
+   shadow, with the hairline stroke as the first shadow layer). The
+   trigger-relative placement uses CSS anchor positioning, the harness's own
+   portal mechanism, so the card tracks zoom and panning without JS
+   measurement, and every candidate reserves the viewport margins. */
 .mainFileCard {
+  position: fixed;
+  position-area: none;
+  top: max(
+    12px,
+    var(--dsh-frame-overlay-top, 12px),
+    calc(anchor(bottom) + 4px)
+  );
+  bottom: 12px;
+  left: max(12px, anchor(left));
+  right: 12px;
+  justify-self: start;
+  align-self: start;
+  margin: 0;
+  z-index: 1100;
   display: flex;
   flex-direction: column;
-  width: min(352px, calc(100vw - 40px));
   box-sizing: border-box;
+  width: max-content;
+  height: fit-content;
+  min-width: min(240px, calc(100vw - 24px));
+  max-width: min(420px, calc(100vw - 24px));
+  max-height: min(360px, calc(100dvh - 96px));
+  overflow: hidden;
+  padding: 4px;
+  border: 0;
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  color: var(--dsw-alias-label-primary);
+  /* The elevated surface rebinds the scrollbar tokens so the scrolling
+     candidate list takes the l2 elevation pair (ui-theme scrollbar.css). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
+/* When the space below the trigger cannot hold the card, the browser tries
+   the opposite side and then a window-bounded placement (harness menu
+   portal semantics). */
+.mainFileCard {
+  position-try-fallbacks: --dsh-typst-above, --dsh-typst-window;
+}
+
+@position-try --dsh-typst-above {
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 4px));
+  align-self: end;
+}
+
+@position-try --dsh-typst-window {
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: 12px;
+  align-self: safe start;
+}
+
+/* The search band is the harness menu's own search-field pattern, composed
+   here because the primitive's `SearchField` is not exported: a transparent
+   field on a 3px-bottom-padded band, separated from the rows by a 0.5px l2
+   hairline, 13px copy. It is a feature composition, not a restyled host
+   `Input`: the card's field material belongs to the band, exactly as in a
+   host menu, and the previous version fought the primitive with transparent
+   borders and local padding. The band copies the host `SearchField` row
+   verbatim: 32px field + 3px optical bottom padding + its own 0.5px hairline,
+   the same height formula, hairline and 6px icon gap. 32px is the field's
+   default, spelled out here because the seam that carries it
+   (`--dsh-search-field-height`) is published inside ui-primitives, not to
+   features. */
 .mainFileSearch {
   flex: none;
-  margin: 2px 2px 3px;
-}
-
-/* The search field is the menu's own row: no chrome over the card material.
-   The compound selectors outrank the primitive's own wrapper rules. */
-.mainFileSearch .mainFileSearchInput {
-  width: 100%;
-  height: auto;
-  padding: 5px 7px;
-  border-color: transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: calc(32px + 3px + 0.5px);
+  padding: 0 8px 3px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: text;
+  overflow: hidden;
 }
 
-.mainFileSearch .mainFileSearchInput:focus-within {
-  border-color: transparent;
+/* Keyboard focus lands on the band, not on an inner outline: the caret plus
+   the band's bottom edge turning to the business accent is the field's focus
+   feedback (the host search field shows none). */
+.mainFileSearch:focus-within {
+  border-bottom-width: 1px;
+  border-bottom-color: var(--dsw-alias-state-business-primary);
 }
 
-.mainFileSearchInput input {
-  font: var(--dsw-font-xxs-12);
+.mainFileSearchIcon {
+  flex: none;
+  color: var(--dsw-alias-menu-icon);
 }
 
-.mainFileSearchInput input::placeholder {
-  color: var(--dsw-alias-label-caption);
+.mainFileSearchInput {
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+}
+
+.mainFileSearchInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* The rows scroll inside the card, so the search field and the footer stay
-   in place while a long workspace list moves under the pointer. */
+   in place while a long workspace list moves under the pointer. The list
+   container itself carries no horizontal padding: the card's 4px padding and
+   the row's own 8px padding are the whole inset, as in a harness menu. */
 .mainFileList {
   min-height: 0;
   max-height: min(280px, 40vh);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 0 2px;
+  padding: 0;
 }
 
+/* The footer is the harness menu's pinned-footer pattern: a hairline above it
+   separates it from the scrolling rows, and it keeps the secondary controls
+   reachable without scrolling the list. In a harness menu the footer's rows
+   are menu rows, so they carry that row's 8px inset; ours are form controls
+   instead, so they carry the same inset themselves. Without it the controls
+   sit flush against the card edge while the rows above stay inset. */
 .mainFileFooter {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   margin-top: 4px;
-  padding: 8px 2px 2px;
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  padding-top: 4px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
 
 .mainFilePathForm {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 0 8px;
 }
 
 .mainFilePath {
   flex: 1;
   min-width: 0;
+  /* The primitive's wrapper is content-box, so a flex basis plus its own
+     padding would push the field past the form. */
+  box-sizing: border-box;
 }
 
 .mainFileScan {
@@ -193,10 +348,22 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding: 0 8px;
 }
 
+/* Footer copy sits at the row's 8px inset and the meta step; the empty
+   candidate list is a row of its own and keeps the same inset so the card's
+   left edge stays a single axis. */
 .mainFileHint {
   margin: 0;
+  padding: 0 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+.mainFileEmpty {
+  margin: 0;
+  padding: 8px;
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-xxs-12);
 }
@@ -234,8 +401,13 @@
   flex-direction: column;
   align-items: center;
   min-width: max-content;
-  gap: 16px;
-  padding: 16px;
+  /* Pages are separate objects, but the stage's rhythm is the host document
+     preview's: a 12px gap and a 12px inset. The bottom inset is a local
+     variable because the floating page bar grows a row in a narrow panel and
+     the pages must still be able to scroll clear of it. */
+  --typst-pagebar-clearance: 56px;
+  gap: 12px;
+  padding: 12px 12px var(--typst-pagebar-clearance);
 }
 
 .pageSlot {
@@ -294,8 +466,12 @@
 }
 
 .pdfText ::selection {
-  background: color-mix(in srgb, var(--dsw-alias-link) 30%, transparent);
+  background: var(--dsw-alias-bg-document-selection);
   color: transparent;
+}
+
+.pdfText br::selection {
+  background: transparent;
 }
 
 .pagePlaceholder,
@@ -360,83 +536,105 @@
   box-sizing: border-box;
   padding: 4px 6px;
   background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l2);
+  border: 0;
   border-radius: var(--dsw-radius-lg);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
   box-shadow: var(--dsw-elevation-panel);
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  justify-content: center;
+  row-gap: 2px;
   max-width: calc(100% - 24px);
 }
 
+/* The mode and fit pickers are native selects: they keep the platform
+   control, so the harness standard control size (H32/R12) applies and the
+   label stays on the type ladder rather than a local size. */
 .pagebar select {
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: var(--dsw-radius-xs);
+  flex: none;
+  height: 28px;
+  padding: 0 6px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
-  padding: 2px 4px;
   font: var(--dsw-font-xxs-12);
-  height: 24px;
 }
 
-.pageNavBtn {
-  display: inline-flex;
+/* Two navigation scopes share one pill, so the pill states them apart: a
+   2px cluster gap and a 1px l2 rule between history (back/forward) and
+   pagination (prev / field / next). Four identical chevrons in one
+   undifferentiated row read as a single unexplained cluster. The rule is the
+   same 14px toolbar divider the sibling projects use. */
+.pagebarGroup {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 2px;
-  border: 1px solid transparent;
-  border-radius: var(--dsw-radius-xs);
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-  cursor: pointer;
+  gap: 2px;
+  flex: none;
 }
 
-.pageNavBtn svg {
-  width: 14px;
+.pagebarDivider {
+  flex: none;
+  width: 1px;
   height: 14px;
+  background: var(--dsw-alias-border-l2);
 }
 
-.pageNavBtn:disabled {
-  color: var(--dsw-alias-label-dimmed);
-  cursor: default;
-}
-
+/* The page indicator keeps its number and total on one line; the previous
+   flexible form wrapped the total under the field in narrow panels. */
 .pageInputForm {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
+  flex: none;
+  white-space: nowrap;
   font: var(--dsw-font-xxs-12);
   color: var(--dsw-alias-label-secondary);
 }
 
 .pageInput {
   width: 36px;
-  height: 22px;
-  padding: 1px 3px;
+  height: 28px;
+  /* Compact control: H28 takes R8 and the 12px meta step, like the two
+     selects beside it, so the whole numeric cluster shares one size. */
+  padding: 0 4px;
   box-sizing: border-box;
   text-align: center;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: var(--dsw-radius-xs);
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
   font: var(--dsw-font-xxs-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.pageInput:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
 }
 
 .pageTotal {
   font-variant-numeric: tabular-nums;
   padding-right: 2px;
+  white-space: nowrap;
 }
 
-.zoom {
-  position: static !important;
-  transform: none !important;
-  inset: auto !important;
-  opacity: 1 !important;
-  pointer-events: auto !important;
-  border: 0 !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-  background: transparent !important;
+/* ZoomControls is a floating panel by default. Inside the pagebar it is an
+   inline row: the two-class selector outranks the primitive's .panel/.visible
+   without !important, so a later primitive stylesheet cannot silently undo it
+   and the override stays visible to the style guard. */
+.pagebar .zoom {
+  position: static;
+  inset: auto;
+  inset-inline-start: auto;
+  z-index: auto;
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  background: transparent;
   flex: none;
 }
 
@@ -446,22 +644,53 @@
   z-index: 2;
   padding: 0;
   pointer-events: none;
-  background: color-mix(in srgb, var(--dsw-alias-link) 24%, transparent);
-  border: 1px solid var(--dsw-alias-link);
+  /* The theme's document-selection fill is 40% opaque, which hides the text
+     under a marked region; the marker keeps the token's hue at a readable
+     strength. */
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-bg-document-selection) 55%,
+    transparent
+  );
+  /* A marked region is a selection mark, so its edge takes the same business
+      accent the outline rail and the comment marker use; `link` is for
+      clickable text and would read as a broken link on a page. */
+  border: 1px solid var(--dsw-alias-state-business-primary);
   border-radius: var(--dsw-radius-xs);
 }
 
 .annotationMarker {
   position: absolute;
   z-index: 2;
+  display: grid;
+  place-items: center;
   width: 20px;
   height: 24px;
   padding: 0;
   border: 0;
   border-radius: var(--dsw-radius-xs);
   background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-link);
+  /* A comment marker is an annotation mark on the page, not a hyperlink. */
+  color: var(--dsw-alias-state-business-primary);
   cursor: pointer;
+}
+
+.annotationMarker:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+
+/* The marker is drawn, not a Unicode glyph: a font-dependent ● would change
+   shape and baseline across platforms. The dot keeps the theme's full-round
+   pairing (radius 50% with corner-shape round). */
+.annotationMarker::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  corner-shape: round;
+  background: currentColor;
 }
 
 .regionLayer {
@@ -472,10 +701,18 @@
   cursor: crosshair;
 }
 
+/* The captured region reuses the theme's document-selection hue, the same
+   token the PDF text layer paints its selection with, so a dragged region
+   reads as the same selection affordance as a highlighted word. The strength
+   keeps the selected text legible underneath. */
 .regionRect {
   position: absolute;
-  border: 1px solid var(--dsw-alias-link);
-  background: color-mix(in srgb, var(--dsw-alias-link) 12%, transparent);
+  border: 1px solid var(--dsw-alias-state-business-primary);
+  background: color-mix(
+    in srgb,
+    var(--dsw-alias-bg-document-selection) 55%,
+    transparent
+  );
   pointer-events: none;
 }
 
@@ -484,28 +721,63 @@
   width: 12px;
   height: 12px;
   transform: translate(-50%, -50%);
-  background: var(--dsw-alias-link);
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-state-business-primary);
   pointer-events: auto;
   cursor: crosshair;
 }
 
+/* The capture bar is an elevated floating surface, not a second header: it
+   floats over the page and keeps its own radius and elevation, so it reads as
+   a mode affordance rather than a broken second strip. It stays stuck to the
+   top of the page while the page scrolls, so the instructions and the capture
+   action remain reachable during a selection. */
 .regionActions {
   position: sticky;
   top: 0;
   z-index: 4;
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
-  background: var(--dsw-alias-bg-layer-2);
-  padding: 8px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  box-sizing: border-box;
+  margin: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* The instructions take the remaining width; the capture and cancel actions
+   stay beside them at the end of the row, and move to their own row when the
+   text needs the space. */
+.regionHint {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.regionButtons {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-inline-start: auto;
+}
+
+.regionError {
+  flex: 1 0 100%;
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .banner,
 .notice {
   padding: 6px 12px;
   flex: none;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-2);
   overflow-wrap: anywhere;
   font: var(--dsw-font-xxs-12);
@@ -523,7 +795,7 @@
   max-height: 20%;
   overflow: auto;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-2);
 }
 
@@ -535,6 +807,19 @@
   min-width: 0;
 }
 
+/* The selection actions attach to the stage they act on: a bar with a top
+   hairline and the raised row fill, instead of three buttons floating over
+   whatever comes next in the column. */
+.selectionBar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
 /* Auxiliary Drawer (Outline, Problems, Annotations) */
 .auxiliary {
   flex: none;
@@ -542,7 +827,7 @@
   max-height: 60%;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-1);
 }
 
@@ -553,15 +838,19 @@
   max-height: 100%;
 }
 
+/* The drawer header repeats the panel header's rhythm — 38px min-height,
+   4px vertical padding, a 28px control row — so the drawer and the panel read
+   as the same chrome tier rather than two invented bars. */
 .auxiliaryHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 10px;
   box-sizing: border-box;
   flex: none;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  min-height: 38px;
+  padding: 4px 8px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-1);
 }
 
@@ -579,36 +868,65 @@
   padding: 8px 12px;
 }
 
+/* An empty auxiliary panel states itself in the tertiary label tone on the
+   13px ladder step, rather than the browser's default body metrics. */
+.auxiliaryBody > p {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-13);
+}
+
+/* The splitter is a keyboard control (role=separator, arrow keys), so it
+   shows the focus ring like any other focusable control. The hairline is the
+   structural seam between two stacked regions. */
 .splitter {
   flex: none;
   height: 6px;
   cursor: row-resize;
   touch-action: none;
   background: var(--dsw-alias-bg-layer-2);
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.splitter:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
 }
 
 /* Outline Panel */
+/* A navigation row: H24, so the compact control radius (R8). The current
+   marker is a rail that is always present and only changes colour — adding
+   the 2px rail to a 0px border at rest would shift the row's text by 2px and
+   break the vertical axis between neighbouring rows. The rail is the business
+   accent, the same language as the page's marks. */
 .outlineRow {
   display: flex;
   align-items: center;
   min-width: 0;
-  border-radius: var(--dsw-radius-xs);
+  border-radius: var(--dsw-radius-sm);
+  border-inline-start: 2px solid transparent;
   padding: 2px 4px;
 }
 
 .outlineRow[aria-current] {
   background: var(--dsw-alias-interactive-bg-hover);
-  border-inline-start: 2px solid var(--dsw-alias-link);
+  border-inline-start-color: var(--dsw-alias-state-business-primary);
 }
 
-.outlineToggle {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  padding: 0;
+/* The row is the keyboard stop; its inner buttons are taken out of the tab
+   order, so the ring belongs to the row. An inset ring keeps the row inside
+   the list's 12px reading inset. */
+.outlineRow:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid
+    var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -1px;
 }
 
+/* An outline entry is a row, so it takes the 13px row step rather than the
+   14px prose step. An entry without a destination reads as unavailable:
+   tertiary ink and no pointer affordance; the row also drops its hover fill
+   through `aria-disabled`. */
 .outlineTitleButton {
   display: flex;
   align-items: center;
@@ -619,9 +937,14 @@
   border: 0;
   background: transparent;
   color: var(--dsw-alias-label-primary);
-  font: var(--dsw-font-s-14);
+  font: var(--dsw-font-xs-13);
   cursor: pointer;
   text-align: start;
+}
+
+.outlineTitleButton:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
 }
 
 .outlineTitle {
@@ -644,13 +967,70 @@
   gap: 8px;
 }
 
-.problemCard {
+/* One entry in an auxiliary list: a grouped cell with a state tag, a message
+   and its actions. The stroke is the card tier (l2), the radius the standard
+   cell (12), and the internal gap (4) is half the peer gap (8) so the cluster
+   reads as one card instead of two rows. */
+.entryCard {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: var(--dsw-radius-sm);
+  gap: 4px;
+  padding: 8px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* A settled tool result in the transcript is an independent content card, not
+   a diagnostic entry: the large card radius and the 13px row copy. */
+.resultCard {
+  padding: 10px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  overflow-wrap: anywhere;
+}
+
+/* An agent annotation reuses the entry card shell and states its body: the
+   quote takes a 2px neutral rail (an accent bar, not a divider — the
+   carve-out is declared in the style guard) with 8px inset and secondary ink;
+   the comment reads as the entry's own 13px copy. */
+.annotationQuote {
+  margin: 0;
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
+  white-space: pre-wrap;
+}
+
+.annotationComment {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-13);
+  overflow-wrap: anywhere;
+}
+
+.annotationStale {
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+}
+
+/* Rendered-page tool card */
+.renderGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.renderImage {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
   background: var(--dsw-alias-bg-layer-1);
 }
 
@@ -665,7 +1045,21 @@
   display: flex;
   align-items: center;
   margin-top: 2px;
-  cursor: pointer;
+}
+
+/* The row's accessible name already carries the diagnostic message; the
+   primitive's visible label would repeat it, so hide only that span while
+   keeping the control and its accessible name. */
+.problemSelect > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .problemTag {
@@ -675,7 +1069,7 @@
 .problemMessage {
   flex: 1;
   min-width: 0;
-  font: var(--dsw-font-s-14);
+  font: var(--dsw-font-xs-13);
   color: var(--dsw-alias-label-primary);
   overflow-wrap: anywhere;
 }
@@ -686,11 +1080,6 @@
   justify-content: space-between;
   gap: 8px;
   padding-inline-start: 24px;
-}
-
-.problemLocation {
-  font: var(--dsw-font-xxs-12);
-  color: var(--dsw-alias-link);
 }
 
 .problemUnavailable {
@@ -719,10 +1108,10 @@
 
 .problemDetailsContent pre {
   margin: 4px 0;
-  padding: 6px;
+  padding: 8px;
   background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: var(--dsw-radius-xs);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--dsw-font-markdown-code);
@@ -732,6 +1121,13 @@
 .problemTrace {
   margin: 2px 0;
   overflow-wrap: anywhere;
+}
+
+/* Emphasis by ink, not by a 700-weight `<strong>`: the hint label carries the
+   primary tone at the ceiling weight, the hint itself stays secondary. */
+.problemHintLabel {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xs-strong-13);
 }
 
 /* Feedback Drawer / Panel */
@@ -745,12 +1141,21 @@
   max-height: 75%;
   overflow: auto;
   padding: 12px;
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  border: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
   background: var(--dsw-alias-bg-layer-2);
+  /* A drawer is a raised row surface (layer-2), so its stroke is the
+     structural divider l2, not the menu's faint l1: the drawer has to read as
+     separate from the document behind it. */
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
   box-shadow: var(--dsw-elevation-panel);
+}
+
+.feedbackTitle {
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-strong-14);
 }
 
 .feedback label {
@@ -763,10 +1168,15 @@
   width: 100%;
   min-height: 64px;
   resize: vertical;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: var(--dsw-radius-sm);
+  /* A standard field edge is l4 (the host Input's own tier), not the compact
+     control edge l3. */
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
+  /* Form controls do not inherit the panel's font; state the ladder role
+     explicitly so the text follows the reader's font-size axis. */
+  font: var(--dsw-font-s-14);
   padding: 6px 8px;
   box-sizing: border-box;
 }
@@ -779,12 +1189,23 @@
   max-width: 100%;
   max-height: 200px;
   object-fit: contain;
-  border-radius: var(--dsw-radius-xs);
-  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.feedback figure figcaption {
+  margin-top: 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxs-12);
+  overflow-wrap: anywhere;
 }
 
 .feedback blockquote {
   margin: 8px 0;
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
   white-space: pre-wrap;
 }
 
@@ -795,14 +1216,83 @@
   min-height: 0;
 }
 
-/* Container Queries for Responsive Sidebar Widths */
-@container (max-width: 440px) {
-  .pagebar select {
-    display: none;
+/* The setup page's own headings and prose sit on the theme's type ladder
+   instead of the browser's default heading metrics. */
+.setup h2 {
+  margin: 0 0 8px;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-l-20);
+}
+
+.setup h3 {
+  margin: 16px 0 4px;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-s-strong-14);
+}
+
+.setup p {
+  margin: 0 0 12px;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-s-14);
+}
+
+/* A command the reader copies is a code surface, not prose that happens to
+   contain a command: code family on the raised row fill, a card hairline, R8,
+   and text selection left on. */
+.setupCommand {
+  padding: 6px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-markdown-code);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* An inline alert line: the error tone at the 12px meta step, on the alert
+   baseline shared by the setup page and the outline's retry row. */
+.alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font: var(--dsw-font-xxs-12);
+  overflow-wrap: anywhere;
+}
+
+/* Container queries adapt the panel chrome to its own width, not the window's:
+   the same tab docks at any width the sidebar allows. The shell leaves the
+   panel to fill its track, so every control row has to reflow here rather than
+   at a viewport breakpoint. Anonymous containers keep CSS Modules from
+   rewriting a name; the root declares `container-type: inline-size`. */
+
+/* One row fits the page bar down to roughly 500px. Below that the bar wraps
+   in document order, so no control disappears and the reading order stays the
+   same; the pill grows to the available width and stays centred over the
+   page. */
+@container (max-width: 520px) {
+  .pagebar {
+    width: calc(100% - 24px);
+    max-width: none;
   }
 
-  .historyNav {
-    display: none;
+  .pages {
+    --typst-pagebar-clearance: 88px;
+  }
+
+  /* The drawer header has the same failure mode as the page bar: its tabs and
+     its two actions are one nowrap row by default. Let the actions drop to a
+     second row and stay right-aligned, instead of overflowing the drawer. */
+  .auxiliaryHeader {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .auxiliaryHeaderActions {
+    margin-inline-start: auto;
   }
 
   .mainFileLabel {
@@ -810,13 +1300,59 @@
   }
 }
 
+@container (max-width: 380px) {
+  .header {
+    gap: 4px;
+    padding-inline: 8px;
+  }
+
+  .mainFileLabel {
+    max-width: 110px;
+  }
+
+  /* Selection actions are text buttons; wrapping keeps the last one reachable
+     when the panel is narrower than their natural row. */
+  .selectionBar {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .emptyState {
+    padding: 16px;
+  }
+
+  .setup {
+    padding: 12px;
+  }
+
+  .auxiliaryBody {
+    padding: 8px;
+  }
+}
+
 @container (max-width: 320px) {
+  /* The divider is a grouping cue, and the narrowest pill has no room for
+     it: at this width the two clusters sit against the pill's edges and read
+     as separate by their own position. */
+  .pagebarDivider {
+    display: none;
+  }
+
   .mainFileLabel {
     max-width: 90px;
   }
 
-  .statusTag {
-    font: var(--dsw-font-xxs-12);
+  /* The narrow-panel rule keeps the status chip at the control's own size:
+     shrinking a Tag to fit is control design, and a two-digit count already
+     fits the header at 320px. */
+}
+
+@container (max-width: 300px) {
+  /* At this width the page bar takes a third row: pagination and zoom no
+     longer share a row. Raise the page inset to match, so the final page can
+     still be scrolled fully above the bar. */
+  .pages {
+    --typst-pagebar-clearance: 120px;
   }
 }
 
@@ -826,16 +1362,20 @@
     background: var(--dsw-alias-interactive-bg-hover);
   }
 
-  .pageNavBtn:hover:not(:disabled) {
+  .outlineRow:hover:not([aria-current]):not([aria-disabled="true"]) {
     background: var(--dsw-alias-interactive-bg-hover);
   }
 
-  .outlineRow:hover:not([aria-current]) {
-    background: var(--dsw-alias-interactive-bg-hover);
+  .annotationMarker:hover {
+    background: var(--dsw-alias-interactive-bg-active);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* The only remaining !important pair: one blanket rule has to beat every
+     animated descendant's own transition/animation declaration, including
+     primitives whose class names this sheet does not own. Listing them would
+     go stale with every primitive upgrade. */
   .root * {
     scroll-behavior: auto;
     transition: none !important;

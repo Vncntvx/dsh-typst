@@ -1,25 +1,9 @@
 import { useEffect, useState } from "react";
-import { Button, Tag } from "@deepseek-ai/dsh-client-ui-primitives";
+import { Button, Checkbox, Tag } from "@deepseek-ai/dsh-client-ui-primitives";
+import { LinkButton } from "./LinkButton.js";
 import type { DiagnosticView, TypstStateFrame } from "../contract.js";
 import type { Translate } from "./types.js";
 import styles from "./preview.module.css";
-
-export function diagnosticText(diagnostic: DiagnosticView): string {
-  return [
-    `${diagnostic.severity}: ${diagnostic.message}`,
-    diagnostic.location
-      ? `${diagnostic.location.file}:${diagnostic.location.line}:${diagnostic.location.column}`
-      : "",
-    diagnostic.excerpt ?? "",
-    ...diagnostic.hints.map((hint) => `hint: ${hint}`),
-    ...diagnostic.trace.map(
-      (point) =>
-        `${point.location ? `${point.location.file}:${point.location.line}` : ""} ${point.message}`,
-    ),
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
 
 export function ProblemsPanel({
   frame,
@@ -41,13 +25,19 @@ export function ProblemsPanel({
       ({ diagnostic }) =>
         severity === "all" || diagnostic.severity === severity,
     );
+  const selectedVisible = visible.filter(({ index }) => selected.has(index));
   return (
     <div className={styles.stack}>
       <div className={styles.inline}>
         <select
           aria-label={t("problems.filter")}
           value={severity}
-          onChange={(event) => setSeverity(event.target.value)}
+          onChange={(event) => {
+            setSeverity(event.target.value);
+            // A hidden row must not stay selected: "Fix selected" would
+            // otherwise submit a diagnostic the reader cannot see.
+            setSelected(new Set());
+          }}
         >
           <option value="all">{t("problems.all")}</option>
           <option value="error">{t("status.error")}</option>
@@ -63,36 +53,42 @@ export function ProblemsPanel({
         </Button>
         <Button
           size="sm"
-          disabled={!selected.size}
+          disabled={!selectedVisible.length}
           onClick={() =>
-            onFix(frame.diagnostics.filter((_, index) => selected.has(index)))
+            onFix(selectedVisible.map(({ diagnostic }) => diagnostic))
           }
         >
-          {t("problems.fixSelected")} ({selected.size})
+          {t("problems.fixSelected")} ({selectedVisible.length})
         </Button>
       </div>
       {!visible.length && <p>{t("problems.empty")}</p>}
+      {frame.diagnosticsTruncated && (
+        <p role="status">
+          {t("problems.truncated", {
+            shown: frame.diagnostics.length,
+            total: frame.diagnosticsTotal,
+          })}
+        </p>
+      )}
       {visible.map(({ diagnostic, index }) => (
         <article
           key={`${frame.status.run}:${index}`}
-          className={styles.problemCard}
+          className={styles.entryCard}
         >
           <div className={styles.problemHeader}>
-            <label className={styles.problemSelect}>
-              <input
-                type="checkbox"
-                aria-label={`${t("problems.select")} ${diagnostic.message}`}
-                checked={selected.has(index)}
-                onChange={(event) =>
-                  setSelected((current) => {
-                    const next = new Set(current);
-                    if (event.target.checked) next.add(index);
-                    else next.delete(index);
-                    return next;
-                  })
-                }
-              />
-            </label>
+            <Checkbox
+              className={styles.problemSelect}
+              label={`${t("problems.select")} ${diagnostic.message}`}
+              checked={selected.has(index)}
+              onChange={(checked) =>
+                setSelected((current) => {
+                  const next = new Set(current);
+                  if (checked) next.add(index);
+                  else next.delete(index);
+                  return next;
+                })
+              }
+            />
             <Tag
               tone={diagnostic.severity === "error" ? "danger" : "warning"}
               className={styles.problemTag}
@@ -105,16 +101,14 @@ export function ProblemsPanel({
           </div>
           <div className={styles.problemActions}>
             {diagnostic.location ? (
-              <Button
-                size="sm"
-                className={styles.problemLocation}
+              <LinkButton
                 onClick={() =>
                   onSource(diagnostic.location!.file, diagnostic.location!.line)
                 }
               >
                 {diagnostic.location.file}:{diagnostic.location.line}:
                 {diagnostic.location.column}
-              </Button>
+              </LinkButton>
             ) : (
               <span className={styles.problemUnavailable}>
                 {t("source.unavailable")}
@@ -133,7 +127,10 @@ export function ProblemsPanel({
                 {diagnostic.excerpt && <pre>{diagnostic.excerpt}</pre>}
                 {diagnostic.hints.map((hint, i) => (
                   <p key={i} className={styles.problemHint}>
-                    <strong>{t("problems.hint")}:</strong> {hint}
+                    <span className={styles.problemHintLabel}>
+                      {t("problems.hint")}:
+                    </span>{" "}
+                    {hint}
                   </p>
                 ))}
                 {diagnostic.trace.map((point, i) => (

@@ -16,10 +16,9 @@
  *    purity rule allows (`bundlePurityPlugin`).
  * 3. This package's local sources may only enter the client graph when they
  *    are client-safe (`CLIENT_SAFE_LOCAL` in
- *    `scripts/client-graph-authority.mjs`, that regex is the sole authority;
- *    currently `src/client/**` plus the shared pure surfaces `contract`,
- *    `settings-namespace`, `json`, `ref-grammar`, `export-items`,
- *    `changes-contract`, `browse-rows`, and `evidence-item`).
+ *    `scripts/client-graph-authority.mjs`, that regex is the sole authority:
+ *    `src/client/**` plus the shared pure surfaces `contract`, `constants`,
+ *    and `wire-schemas`).
  * 4. Host-only packages (`@deepseek-ai/schemastery`) are refused at resolve time;
  *    `zod` is externalized as a shared platform module.
  *
@@ -120,20 +119,31 @@ function buildCommitOf() {
  *  metafile check until a real value import externalizes it here. Every
  *  external above resolves through the shell's one copy instead of a second
  *  copy bundled into the artifact. */
-const EXTERNALS = [
+/**
+ * Platform modules the loader's module table answers; never bundled. The
+ * authoritative list is `@deepseek-ai/dsh-client-web`'s `PLATFORM_MODULES`
+ * (the shell's `packages/client/web/src/platform.ts`); the unit test reads
+ * the installed package's declaration and fails when this list drifts.
+ */
+export const CLIENT_EXTERNALS = [
   "react",
   "react/jsx-runtime",
   "react-dom",
   "react-dom/client",
+  "@deepseek-ai/cordis",
   "zod",
+  "@tanstack/react-virtual",
   "@deepseek-ai/dsh-client-store",
+  "@deepseek-ai/dsh-client-ui-slots",
   "@deepseek-ai/dsh-client-ui-primitives",
+  "@deepseek-ai/dsh-client-ui-dockkit",
 ];
+const EXTERNALS = CLIENT_EXTERNALS;
 
 /**
  * Harness inline-safety lives in `client-graph-authority.mjs`
  * (`INLINE_SAFE` / `GENERATED_REMOTE` / `VENDORED_LIBRARY`), the counterpart of
- * `packages/client/tsdown.client.ts` at dsh-v0.2.2-rc.1. The three patterns are
+ * `packages/client/tsdown.client.ts` at dsh-v0.2.2-rc.5. The three patterns are
  * a verbatim copy of that file's constants: after a harness bump, diff the
  * upstream file and mirror the change here rather than editing from memory.
  * Packages the host half owns also live there: resolve-time and metafile
@@ -203,8 +213,17 @@ const harnessPurityPlugin = {
 function platformModuleTable() {
   const table = {};
   for (const specifier of EXTERNALS) {
-    if (!specifier.startsWith("@deepseek-ai/"))
+    if (!specifier.startsWith("@deepseek-ai/")) {
+      try {
+        table[specifier] = require(specifier);
+      } catch {
+        // A platform module the bundle does not value-import need not be
+        // installed in this checkout; the shell supplies it at runtime.
+        table[specifier] = {};
+      }
+    } else if (specifier === "@deepseek-ai/cordis") {
       table[specifier] = require(specifier);
+    }
   }
   return table;
 }
@@ -325,7 +344,7 @@ const cssModulesPlugin = {
  *  rolldown, and esbuild has no `?raw` loader, so the same specifier is
  *  served here — the runtime starts its Worker from a Blob URL of this
  *  source (scripts parity with `packages/client/ui-sidebar-documentpreview/
- *  tsdown.config.ts` at dsh-v0.2.2-rc.1). */
+ *  tsdown.config.ts` at dsh-v0.2.2-rc.5). */
 const pdfWorkerSourcePlugin = {
   name: "pdf-worker-source",
   setup(build) {
@@ -386,6 +405,9 @@ export function clientBuildPlugins({ verify = true } = {}) {
 /** Metafile inputs are required for the local-source allowlist re-check. */
 const options = {
   entryPoints: [join(root, "src/client/index.ts")],
+  // Every relative path in the graph and in the purity diagnostics is
+  // resolved against the checkout, not the caller's cwd.
+  absWorkingDir: root,
   plugins: clientBuildPlugins(),
   outfile: join(root, "lib/client.js"),
   bundle: true,

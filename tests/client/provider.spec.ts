@@ -6,8 +6,10 @@ import {
   sessionIdOf,
 } from "../../src/client/provider.js";
 import { frame } from "./helpers/frame.js";
-it("reports a dropped stream as failure and supports an explicit reconnection address", async () => {
+
+it("reconnects a dropped stream in place and reports a run of failures", async () => {
   let provider: ResourceProvider<"typst"> | undefined;
+  let statusCalls = 0;
   const ctx = {
     effect: (callback: () => void) => callback(),
     resources: {
@@ -17,7 +19,10 @@ it("reports a dropped stream as failure and supports an explicit reconnection ad
     },
     remote: {
       typst: {
-        status: async () => ({ ok: true, value: frame() }),
+        status: async () => {
+          statusCalls++;
+          return { ok: true, value: frame() };
+        },
         watch: async function* () {
           throw new Error("Disconnected");
         },
@@ -25,18 +30,30 @@ it("reports a dropped stream as failure and supports an explicit reconnection ad
     },
   };
   registerTypstResource(ctx as unknown as Context);
+  const controller = new AbortController();
   const values = [];
   for await (const value of provider!.open(
     "dsh-resource://typst/state/session?subscription=2",
-    { signal: new AbortController().signal },
-  ))
+    { signal: controller.signal },
+  )) {
     values.push(value);
+    if (values.length >= 4) {
+      controller.abort();
+      break;
+    }
+  }
   expect(sessionIdOf("dsh-resource://typst/state/session?subscription=2")).toBe(
     "session",
   );
   expect(values[0].ok).toBe(true);
-  expect(values[1]).toMatchObject({
+  expect(values.at(-1)).toMatchObject({
     ok: false,
-    error: { message: "Disconnected" },
+    error: {
+      code: "typst/watch-failed",
+      message: "Disconnected",
+      details: { code: "TYPST_WATCH_FAILED" },
+    },
   });
+  // The same resource address retried; no new subscription was minted.
+  expect(statusCalls).toBeGreaterThan(1);
 });

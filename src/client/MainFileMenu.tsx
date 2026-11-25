@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   Button,
   Checkbox,
@@ -6,24 +9,24 @@ import {
   IconChevronDownOutlineRegular,
   IconSearchOutlineRegular,
   Input,
-  Menu,
   MenuGroup,
   MenuItemButton,
+  MenuSurface,
 } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { TypstStateFrame } from "../contract.js";
 import type { TypstNamespace } from "./remote.js";
 import { groupCandidates } from "./candidates.js";
 import type { Translate } from "./types.js";
+import { errorText } from "./types.js";
 import styles from "./preview.module.css";
 
 /**
- * The panel header's main-file picker. The trigger is the harness's compact
- * ghost button; the dropdown is the harness `Menu` in portal mode (so neither
- * the sidebar's overflow nor the tab body's clip can crop it) whose card holds
- * the search field, the grouped candidate rows and the secondary controls in
- * three flat sections. Native primitives own every control, and the card is
- * narrower than the menu's readable bound, which is what keeps the footer's
- * form from overflowing the card.
+ * The panel header's main-file picker. The card is the harness `MenuSurface`
+ * portaled to the body, so neither the sidebar's overflow nor the tab body's
+ * clip can crop it. Its `role="group"` holds the search field, path form and
+ * scan controls; only the candidate rows live inside a nested `role="menu"`.
+ * That split is what the ARIA menu pattern requires, and it keeps the arrow /
+ * Home / End keys from a document-level menu handler away from the text fields.
  */
 export function MainFileMenu({
   frame,
@@ -43,7 +46,51 @@ export function MainFileMenu({
     [error, setError] = useState<string | null>(null);
   const request = useRef(0);
   const indexing = useRef<AbortController | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const id = useId();
+  const cardId = `${id}-card`;
+  // The card is portaled to the body, so CSS anchor positioning connects it
+  // to this trigger through a per-instance anchor name. The harness menus
+  // use the same mechanism, so the card tracks zoom and panning natively.
+  const anchorName = `--dsh-typst-menu-${id.replaceAll(":", "")}`;
+
+  // The trigger carries the anchor name; the card names it as its own
+  // position anchor. Both are inline because the name is per instance.
+  useLayoutEffect(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    trigger.style.setProperty("anchor-name", anchorName);
+    return () => {
+      trigger.style.removeProperty("anchor-name");
+    };
+  }, [anchorName]);
   useEffect(() => () => indexing.current?.abort(), []);
+
+  // The card is portaled: dismissal has to watch both the trigger wrapper and
+  // the card, and Escape must return focus to the trigger.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent): void => {
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target) === true) return;
+      if (cardRef.current?.contains(target) === true) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   const discover = async (includeExcluded: boolean): Promise<void> => {
     indexing.current?.abort();
@@ -59,7 +106,7 @@ export function MainFileMenu({
       if (!controller.signal.aborted && !result.ok)
         setError(result.error.message);
     } catch (failure) {
-      if (!controller.signal.aborted) setError(String(failure));
+      if (!controller.signal.aborted) setError(errorText(failure));
     } finally {
       if (indexing.current === controller) {
         indexing.current = null;
@@ -69,14 +116,17 @@ export function MainFileMenu({
 
   const pick = async (candidate: string): Promise<void> => {
     const id = ++request.current;
-    setOpen(false);
     setPending(candidate);
     setError(null);
     try {
       const result = await remote.setMain(sessionId as never, candidate);
       if (!result.ok) throw new Error(result.error.message);
+      // Close only on success: a failed switch stays visible in the open card
+      // instead of writing into an unmounted one.
+      setOpen(false);
+      triggerRef.current?.focus();
     } catch (failure) {
-      if (id === request.current) setError(String(failure));
+      if (id === request.current) setError(errorText(failure));
     } finally {
       if (id === request.current) setPending(null);
     }
@@ -110,66 +160,99 @@ export function MainFileMenu({
       </MenuItemButton>
     ));
 
+  /** Arrow keys are scoped to the candidate list, never the whole card. */
+  const onListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [
+      ...(listRef.current?.querySelectorAll<HTMLButtonElement>(
+        'button[role="menuitem"]:not(:disabled)',
+      ) ?? []),
+    ];
+    if (items.length === 0) return;
+    event.preventDefault();
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : event.key === "ArrowDown"
+            ? (index + 1) % items.length
+            : (index - 1 + items.length) % items.length;
+    items[next]?.focus();
+  };
+
   return (
-    <div className={styles.mainFile}>
-      <Menu
-        open={open}
-        portal
-        onClose={() => setOpen(false)}
-        anchor={
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className={styles.mainFileTrigger}
-            icon={
-              <FileTypeIcon path={frame.main ?? "document.typ"} size={16} />
-            }
-            aria-haspopup="menu"
-            aria-expanded={open}
-            aria-label={frame.main ?? t("main.choose")}
-            title={
-              pending
-                ? `${t("action.working")} ${pending}`
-                : (frame.main ?? t("main.choose"))
-            }
-            onClick={() => setOpen((value) => !value)}
-          >
-            <span className={styles.mainFileLabel}>
-              {pending
-                ? `${t("action.working")} ${pending}`
-                : (frame.main ?? t("main.choose"))}
-            </span>
-            <IconChevronDownOutlineRegular
-              size={13}
-              className={`${styles.mainFileChevron}${open ? ` ${styles.mainFileChevronOpen}` : ""}`}
-            />
-          </Button>
+    <div className={styles.mainFile} ref={rootRef}>
+      <Button
+        ref={triggerRef}
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={styles.mainFileTrigger}
+        icon={<FileTypeIcon path={frame.main ?? "document.typ"} size={16} />}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? cardId : undefined}
+        aria-label={frame.main ?? t("main.choose")}
+        title={
+          pending
+            ? `${t("action.working")} ${pending}`
+            : (frame.main ?? t("main.choose"))
         }
+        onClick={() => {
+          setOpen((value) => !value);
+          setError(null);
+        }}
       >
-        <div className={styles.mainFileCard}>
-          <div className={styles.mainFileSearch}>
-            <Input
-              className={styles.mainFileSearchInput}
-              icon={<IconSearchOutlineRegular size={16} />}
-              type="text"
-              role="searchbox"
-              aria-label={t("main.search")}
-              placeholder={t("main.search")}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              // The menu card opens with its filter focused, like the app's
-              // own searchable menus.
-              autoFocus
-            />
-          </div>
-          <div className={styles.mainFileList}>
+        <span className={styles.mainFileLabel}>
+          {pending
+            ? `${t("action.working")} ${pending}`
+            : (frame.main ?? t("main.choose"))}
+        </span>
+        <IconChevronDownOutlineRegular
+          size={13}
+          className={`${styles.mainFileChevron}${open ? ` ${styles.mainFileChevronOpen}` : ""}`}
+        />
+      </Button>
+      {open &&
+        createPortal(
+          <MenuSurface
+            ref={cardRef}
+            id={cardId}
+            className={styles.mainFileCard}
+            role="group"
+            aria-label={t("main.choose")}
+            style={{ positionAnchor: anchorName } as CSSProperties}
+          >
+            <div className={styles.mainFileSearch} role="search">
+              <IconSearchOutlineRegular
+                className={styles.mainFileSearchIcon}
+                size={14}
+              />
+              <input
+                className={styles.mainFileSearchInput}
+                type="text"
+                role="searchbox"
+                aria-label={t("main.search")}
+                placeholder={t("main.search")}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                autoFocus
+              />
+            </div>
             {visible === 0 ? (
-              <p className={styles.mainFileHint} role="status">
+              <p className={styles.mainFileEmpty} role="status">
                 {query === "" ? t("main.noFiles") : t("main.noMatch")}
               </p>
             ) : (
-              <>
+              <div
+                ref={listRef}
+                className={styles.mainFileList}
+                role="menu"
+                aria-label={t("main.choose")}
+                onKeyDown={onListKeyDown}
+              >
                 {currentFiles.length > 0 && (
                   <MenuGroup label={t("main.current")}>
                     {rows(currentFiles)}
@@ -185,74 +268,73 @@ export function MainFileMenu({
                     {rows(fragmentFiles)}
                   </MenuGroup>
                 )}
-              </>
+              </div>
             )}
-          </div>
-          <div className={styles.mainFileFooter}>
-            <form
-              className={styles.mainFilePathForm}
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (path.trim()) void pick(path.trim());
-              }}
-            >
-              <Input
-                className={styles.mainFilePath}
-                aria-label={t("main.path")}
-                placeholder={t("main.path")}
-                value={path}
-                onChange={(event) => setPath(event.target.value)}
-              />
-              <Button
-                type="submit"
-                variant="primary"
-                size="sm"
-                disabled={path.trim() === ""}
+            <div className={styles.mainFileFooter} role="group">
+              <form
+                className={styles.mainFilePathForm}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (path.trim()) void pick(path.trim());
+                }}
               >
-                {t("main.open")}
-              </Button>
-            </form>
-            <div className={styles.mainFileScan}>
-              <Checkbox
-                checked={frame.discovery.includeExcluded}
-                onChange={(next) => void discover(next)}
-                label={t("main.includeExcluded")}
-              />
-              <Button
-                size="sm"
-                disabled={frame.discovery.scanning}
-                onClick={() => void discover(frame.discovery.includeExcluded)}
-              >
-                {t("action.refresh")}
-              </Button>
+                <Input
+                  className={styles.mainFilePath}
+                  aria-label={t("main.path")}
+                  placeholder={t("main.path")}
+                  value={path}
+                  onChange={(event) => setPath(event.target.value)}
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  size="sm"
+                  disabled={path.trim() === ""}
+                >
+                  {t("main.open")}
+                </Button>
+              </form>
+              <div className={styles.mainFileScan}>
+                <Checkbox
+                  checked={frame.discovery.includeExcluded}
+                  onChange={(next) => void discover(next)}
+                  label={t("main.includeExcluded")}
+                />
+                <Button
+                  size="sm"
+                  disabled={frame.discovery.scanning}
+                  onClick={() => void discover(frame.discovery.includeExcluded)}
+                >
+                  {t("action.refresh")}
+                </Button>
+              </div>
+              {frame.discovery.scanning && (
+                <p className={styles.mainFileHint} role="status">
+                  {t("main.scanning")} {frame.discovery.visited}
+                </p>
+              )}
+              {error && (
+                <p
+                  className={`${styles.mainFileHint} ${styles.mainFileError}`}
+                  role="alert"
+                >
+                  {error}
+                </p>
+              )}
+              {!!frame.discovery.errors.length && (
+                <details className={styles.mainFileHint}>
+                  <summary>
+                    {t("main.scanErrors")} ({frame.discovery.errors.length})
+                  </summary>
+                  {frame.discovery.errors.map((err) => (
+                    <p key={err}>{err}</p>
+                  ))}
+                </details>
+              )}
             </div>
-            {frame.discovery.scanning && (
-              <p className={styles.mainFileHint} role="status">
-                {t("main.scanning")} {frame.discovery.visited}
-              </p>
-            )}
-            {error && (
-              <p
-                className={`${styles.mainFileHint} ${styles.mainFileError}`}
-                role="alert"
-              >
-                {error}
-              </p>
-            )}
-            {!!frame.discovery.errors.length && (
-              <details className={styles.mainFileHint}>
-                <summary>
-                  {t("main.scanErrors")} ({frame.discovery.errors.length})
-                </summary>
-                {frame.discovery.errors.map((err) => (
-                  <p key={err}>{err}</p>
-                ))}
-              </details>
-            )}
-            <p className={styles.mainFileHint}>{t("main.switchRecompiles")}</p>
-          </div>
-        </div>
-      </Menu>
+          </MenuSurface>,
+          document.body,
+        )}
     </div>
   );
 }

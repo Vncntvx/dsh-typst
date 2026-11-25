@@ -20,6 +20,7 @@ import type { TypstNamespace } from "../remote.js";
 import type { OutlineEntry } from "./outline.js";
 import { usePreview, type LoadedPreview } from "./use-preview.js";
 import { PageSurface, pageScale } from "./PageSurface.js";
+import { IconButton } from "../IconButton.js";
 import {
   identityKey,
   type ReadingPosition,
@@ -81,6 +82,17 @@ export const Reader = forwardRef<
   const [stage, setStage] = useState<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ width: 520, height: 600 });
   const [position, setPosition] = useState(initial);
+  const [moveToken, setMoveToken] = useState(0);
+  const scrollTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (scrollTimer.current !== null) {
+        window.clearTimeout(scrollTimer.current);
+        scrollTimer.current = null;
+      }
+    },
+    [],
+  );
   const live = useRef(position);
   live.current = position;
   const [pinned, setPinned] = useState<Set<number>>(new Set());
@@ -115,12 +127,12 @@ export const Reader = forwardRef<
   useEffect(() => {
     let cancelled = false;
     if (loaded)
-      void loaded.document
-        .getPage(Math.min(position.pageIndex + 1, loaded.document.numPages))
-        .then((page) => {
+      void loaded.sizes
+        .load(Math.min(position.pageIndex, loaded.document.numPages - 1))
+        .then((size) => {
           if (!cancelled) {
-            const viewport = page.getViewport({ scale: 96 / 72 });
-            setNatural({ width: viewport.width, height: viewport.height });
+            setNatural(size);
+            setNavigationError(null);
           }
         })
         .catch((failure) => {
@@ -176,6 +188,7 @@ export const Reader = forwardRef<
       }
       pending.current = next;
       setPosition(next);
+      setMoveToken((value) => value + 1);
       onPosition(next);
     },
     [capture, onPosition, onHistory],
@@ -199,7 +212,15 @@ export const Reader = forwardRef<
       pending.current = null;
     });
     return () => cancelAnimationFrame(handle);
-  }, [loaded, stage, position.zoom, position.mode, position.pageIndex, box]);
+  }, [
+    loaded,
+    stage,
+    position.zoom,
+    position.mode,
+    position.pageIndex,
+    box,
+    moveToken,
+  ]);
   useEffect(() => {
     if (loaded && position.pageIndex >= loaded.document.numPages)
       move(
@@ -312,7 +333,15 @@ export const Reader = forwardRef<
         )
           return;
         const token = ++navigation.current;
-        const page = await loaded.document.getPage(highlight.pageIndex + 1);
+        let page;
+        try {
+          page = await loaded.document.getPage(highlight.pageIndex + 1);
+        } catch (failure) {
+          setNavigationError(
+            failure instanceof Error ? failure.message : String(failure),
+          );
+          return;
+        }
         if (loadedRef.current !== loaded || navigation.current !== token)
           return;
         const viewport = page.getViewport({ scale: 96 / 72 });
@@ -403,10 +432,16 @@ export const Reader = forwardRef<
         tabIndex={0}
         aria-label={t("preview.reading")}
         onScroll={() => {
-          if (pending.current) return;
-          const next = capture();
-          setPosition(next);
-          onPosition(next);
+          if (pending.current || scrollTimer.current !== null) return;
+          // Coalesce a scroll burst into one store write; the trailing event
+          // still captures the final position.
+          scrollTimer.current = window.setTimeout(() => {
+            scrollTimer.current = null;
+            if (pending.current) return;
+            const next = capture();
+            setPosition(next);
+            onPosition(next);
+          }, 100);
         }}
         onPointerUp={() => {
           if (!region) selectText();
@@ -500,70 +535,65 @@ export const Reader = forwardRef<
       </div>
       {loaded && (
         <div className={styles.pagebar}>
-          <Button
-            size="sm"
-            className={styles.historyNav}
-            aria-label={t("navigation.back")}
-            disabled={history.current.index === 0}
-            onClick={() =>
-              ref && typeof ref !== "function" && ref.current?.back()
-            }
-          >
-            ↶
-          </Button>
-          <Button
-            size="sm"
-            className={styles.historyNav}
-            aria-label={t("navigation.forward")}
-            disabled={history.current.index >= history.current.items.length - 1}
-            onClick={() =>
-              ref && typeof ref !== "function" && ref.current?.forward()
-            }
-          >
-            ↷
-          </Button>
-          <button
-            type="button"
-            className={styles.pageNavBtn}
-            aria-label={t("page.previous")}
-            disabled={!pages || position.pageIndex === 0}
-            onClick={() =>
-              move({ ...capture(), pageIndex: position.pageIndex - 1, y: 0 })
-            }
-          >
-            <IconChevronLeftOutlineRegular />
-          </button>
-          <form
-            className={styles.pageInputForm}
-            onSubmit={(event) => {
-              event.preventDefault();
-              const value = Number(pageDraft);
-              if (Number.isInteger(value) && value >= 1 && value <= pages)
-                move({ ...capture(), pageIndex: value - 1, y: 0 });
-              else setPageDraft(String(position.pageIndex + 1));
-            }}
-          >
-            <input
-              aria-label={t("page.label")}
-              inputMode="numeric"
-              className={styles.pageInput}
-              value={pages ? pageDraft : "0"}
-              onChange={(event) => setPageDraft(event.target.value)}
-              onBlur={() => setPageDraft(String(position.pageIndex + 1))}
+          <div className={styles.pagebarGroup}>
+            <IconButton
+              aria-label={t("navigation.back")}
+              disabled={history.current.index === 0}
+              icon={<IconChevronLeftOutlineRegular size={16} />}
+              onClick={() =>
+                ref && typeof ref !== "function" && ref.current?.back()
+              }
             />
-            <span className={styles.pageTotal}>/ {pages}</span>
-          </form>
-          <button
-            type="button"
-            className={styles.pageNavBtn}
-            aria-label={t("page.next")}
-            disabled={!pages || position.pageIndex >= pages - 1}
-            onClick={() =>
-              move({ ...capture(), pageIndex: position.pageIndex + 1, y: 0 })
-            }
-          >
-            <IconChevronRightOutlineRegular />
-          </button>
+            <IconButton
+              aria-label={t("navigation.forward")}
+              disabled={
+                history.current.index >= history.current.items.length - 1
+              }
+              icon={<IconChevronRightOutlineRegular size={16} />}
+              onClick={() =>
+                ref && typeof ref !== "function" && ref.current?.forward()
+              }
+            />
+          </div>
+          <span className={styles.pagebarDivider} aria-hidden="true" />
+          <div className={styles.pagebarGroup}>
+            <IconButton
+              aria-label={t("page.previous")}
+              disabled={!pages || position.pageIndex === 0}
+              icon={<IconChevronLeftOutlineRegular size={16} />}
+              onClick={() =>
+                move({ ...capture(), pageIndex: position.pageIndex - 1, y: 0 })
+              }
+            />
+            <form
+              className={styles.pageInputForm}
+              onSubmit={(event) => {
+                event.preventDefault();
+                const value = Number(pageDraft);
+                if (Number.isInteger(value) && value >= 1 && value <= pages)
+                  move({ ...capture(), pageIndex: value - 1, y: 0 });
+                else setPageDraft(String(position.pageIndex + 1));
+              }}
+            >
+              <input
+                aria-label={t("page.label")}
+                inputMode="numeric"
+                className={styles.pageInput}
+                value={pages ? pageDraft : "0"}
+                onChange={(event) => setPageDraft(event.target.value)}
+                onBlur={() => setPageDraft(String(position.pageIndex + 1))}
+              />
+              <span className={styles.pageTotal}>/ {pages}</span>
+            </form>
+            <IconButton
+              aria-label={t("page.next")}
+              disabled={!pages || position.pageIndex >= pages - 1}
+              icon={<IconChevronRightOutlineRegular size={16} />}
+              onClick={() =>
+                move({ ...capture(), pageIndex: position.pageIndex + 1, y: 0 })
+              }
+            />
+          </div>
           <select
             aria-label={t("reader.mode")}
             value={position.mode}

@@ -4,6 +4,7 @@ import type { TypstStateFrame } from "../contract.js";
 import type { TypstNamespace } from "./remote.js";
 import { installCommandFor } from "./setup-commands.js";
 import type { FeedbackDraft, Translate } from "./types.js";
+import { errorText } from "./types.js";
 import styles from "./preview.module.css";
 
 export function SetupPanel({
@@ -31,7 +32,7 @@ export function SetupPanel({
       const result = await remote[kind](sessionId as never);
       if (!result.ok) throw new Error(result.error.message);
     } catch (failure) {
-      setError(String(failure));
+      setError(errorText(failure));
     } finally {
       setPending(null);
     }
@@ -71,7 +72,7 @@ export function SetupPanel({
         {t("setup.reviewRequest")}
       </Button>
       <h3>{t("setup.install")}</h3>
-      <p>{command ?? t("setup.unknown")}</p>
+      <p className={styles.setupCommand}>{command ?? t("setup.unknown")}</p>
       <div className={styles.inline}>
         <Button
           disabled={pending !== null}
@@ -86,7 +87,11 @@ export function SetupPanel({
           {pending === "restart" ? t("action.working") : t("setup.restart")}
         </Button>
       </div>
-      {error && <div role="alert">{error}</div>}
+      {error && (
+        <div className={styles.alert} role="alert">
+          {error}
+        </div>
+      )}
       <details>
         <summary>{t("setup.searched")}</summary>
         {frame.setup.searched.map((path) => (

@@ -5,7 +5,10 @@ import type {
 } from "../contract.js";
 import type { Dict } from "./locales.js";
 
-export type Translate = (key: keyof Dict) => string;
+export type Translate = (
+  key: keyof Dict,
+  params?: Record<string, unknown>,
+) => string;
 export type Zoom =
   { kind: "fit-width" | "fit-page" } | { kind: "fixed"; percent: number };
 export interface ReadingPosition {

@@ -92,20 +92,24 @@ describe("the outline resolver", () => {
     expect(entries[0]?.pageIndex).toBeNull();
   });
 
-  it("reports a document destination lookup failure distinctly from an empty outline", async () => {
-    await expect(
-      resolveOutline(
-        {
-          async getDestination(): Promise<unknown[] | null> {
-            throw new Error("no destinations");
-          },
-          async getPageIndex(): Promise<number> {
-            throw new Error("no pages");
-          },
+  it("keeps a heading whose destination lookup fails", async () => {
+    const entries = await resolveOutline(
+      {
+        async getDestination(): Promise<unknown[] | null> {
+          throw new Error("no destinations");
         },
-        [{ title: "Broken", dest: "ghost", items: [] }],
-      ),
-    ).rejects.toThrow("no destinations");
+        async getPageIndex(): Promise<number> {
+          throw new Error("no pages");
+        },
+      },
+      [{ title: "Broken", dest: "ghost", items: [] }],
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      title: "Broken",
+      pageIndex: null,
+      destination: null,
+    });
   });
 
   it("returns nothing for a document without headings", async () => {

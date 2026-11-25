@@ -1,5 +1,5 @@
 /**
- * Types for `scripts/style-tokens.mjs`, driven by `tests/unit/style-tokens`.
+ * Types for `scripts/style-tokens.mjs`.
  * @module dsh-typst/scripts/style-tokens
  */
 
@@ -39,6 +39,53 @@ export interface StyleTokenDiff {
  * @returns the pinned version, or `''` when the line is absent.
  */
 export declare function pinnedHarness(pkg: unknown): string;
+
+/** Path overrides for theme discovery. */
+export interface ThemeDirOptions {
+  /** Explicit `DSH_THEME_DIR`; when set it is the only candidate. */
+  readonly env?: string;
+  /** A sibling checkout's `ui-theme/src/styles`. */
+  readonly sibling?: string;
+  /** The installed pinned package's `src/styles`. */
+  readonly installed?: string;
+}
+
+/** Paths and probes for theme resolution, with the manifest pin. */
+export interface ThemeDirProbe extends ThemeDirOptions {
+  /** The pinned harness version a sibling must match. */
+  readonly pin?: string;
+  /** Existence probe, for tests. */
+  readonly exists?: (dir: string) => boolean;
+  /** Version probe for a theme directory, for tests. */
+  readonly version?: (dir: string) => string | null;
+}
+
+/**
+ * The theme sheet directories to try, in priority order.
+ * @param options - path overrides.
+ * @returns the candidates; an explicit directory is the only one.
+ */
+export declare function themeDirCandidates(options?: ThemeDirOptions): string[];
+
+/**
+ * The first candidate that exists on disk.
+ * @param candidates - directories, in priority order.
+ * @param exists - existence probe, for tests.
+ * @returns the first existing directory, or undefined.
+ */
+export declare function firstExisting(
+  candidates: readonly string[],
+  exists?: (dir: string) => boolean,
+): string | undefined;
+
+/**
+ * The theme directory the check should read.
+ * @param options - the pin, path overrides, and probes for tests.
+ * @returns the directory to read, or undefined when none exists.
+ */
+export declare function resolveThemeDir(
+  options?: ThemeDirProbe,
+): string | undefined;
 
 /**
  * Every custom property a stylesheet defines under one prefix.

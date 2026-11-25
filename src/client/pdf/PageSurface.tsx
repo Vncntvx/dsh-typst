@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { HighlightView, SnapshotView } from "../../contract.js";
 import type { LoadedPreview } from "./use-preview.js";
 import { preparePage, captureRegion, type PreparedPage } from "./page.js";
@@ -27,7 +28,7 @@ export function pageScale(
       : Math.min(available, Math.max(1, height - 32) / naturalHeight),
   );
 }
-export function PageSurface({
+export const PageSurface = memo(function PageSurface({
   loaded,
   snapshot,
   index,
@@ -61,18 +62,26 @@ export function PageSurface({
   const box = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(index === loaded.seedIndex);
-  const [natural, setNatural] = useState({ width: 794, height: 1123 });
+  const [natural, setNatural] = useState(
+    () => loaded.sizes.get(index) ?? { width: 794, height: 1123 },
+  );
   const [page, setPage] = useState<PreparedPage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const current = useRef<PreparedPage | null>(null);
   const scale = pageScale(zoom, width, height, natural.width, natural.height);
   useEffect(() => {
+    if (!near && index !== loaded.seedIndex) return;
+    const known = loaded.sizes.get(index);
+    if (known !== undefined) {
+      setNatural(known);
+      return;
+    }
     let cancelled = false;
-    void loaded.document
-      .getPage(index + 1)
-      .then((page) => {
-        const v = page.getViewport({ scale: 96 / 72 });
-        if (!cancelled) setNatural({ width: v.width, height: v.height });
+    void loaded.sizes
+      .load(index)
+      .then((size) => {
+        if (!cancelled) setNatural(size);
       })
       .catch((failure) => {
         if (!cancelled) setError(String(failure));
@@ -80,9 +89,15 @@ export function PageSurface({
     return () => {
       cancelled = true;
     };
-  }, [loaded, index]);
+  }, [loaded, index, near]);
   useEffect(() => {
     if (!box.current || !root) return;
+    if (typeof IntersectionObserver === "undefined") {
+      // A WebView without the observer renders every page eagerly instead of
+      // throwing during mount.
+      setNear(true);
+      return;
+    }
     const observer = new IntersectionObserver(
       (entries) => setNear(entries[0]?.isIntersecting ?? false),
       { root, rootMargin: "100% 0px" },
@@ -134,10 +149,16 @@ export function PageSurface({
         previous?.dispose();
       })
       .catch((failure) => {
-        if (!controller.signal.aborted) setError(String(failure));
+        if (controller.signal.aborted) return;
+        // A failed re-render must not keep showing the previous bitmap under
+        // the old scale; show the page-level error and offer one retry.
+        current.current?.dispose();
+        current.current = null;
+        setPage(null);
+        setError(String(failure));
       });
     return () => controller.abort();
-  }, [loaded, index, scale, near, pinned, region]);
+  }, [loaded, index, scale, near, pinned, region, retry]);
   useEffect(
     () => () => {
       current.current?.dispose();
@@ -157,7 +178,16 @@ export function PageSurface({
       <div ref={host} className={styles.pagePixels} />
       {!page && (
         <div className={styles.pagePlaceholder}>
-          {error ?? `${t("page.label")} ${index + 1}`}
+          {error === null ? (
+            `${t("page.label")} ${index + 1}`
+          ) : (
+            <>
+              <span>{error}</span>
+              <Button size="sm" onClick={() => setRetry((value) => value + 1)}>
+                {t("action.retry")}
+              </Button>
+            </>
+          )}
         </div>
       )}
       {page &&
@@ -212,9 +242,7 @@ export function PageSurface({
                 style={{ top: Math.max(0, point[1]), right: 2 }}
                 aria-label={highlight.comment || highlight.quote}
                 onClick={() => onComment(highlight.id)}
-              >
-                ●
-              </button>
+              />
             );
           })}
       {region && page && (
@@ -231,4 +259,4 @@ export function PageSurface({
       )}
     </div>
   );
-}
+});

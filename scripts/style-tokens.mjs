@@ -29,29 +29,63 @@
  *   node scripts/style-tokens.mjs           # check the snapshot against upstream
  *   node scripts/style-tokens.mjs --write   # rewrite the `dsw` and `ds` halves
  *
- * `DSH_THEME_DIR` overrides the theme sheet directory for a non-sibling
- * checkout. A missing directory fails the check rather than writing an empty
- * snapshot: an empty allowlist would reject every token at once.
+ * The sheets come from the installed pinned `@deepseek-ai/dsh-client-ui-theme`
+ * by default; a sibling checkout is used only when its version matches the
+ * pin. `DSH_THEME_DIR` overrides the theme sheet directory explicitly. A
+ * missing directory fails the check rather than writing an empty snapshot: an
+ * empty allowlist would reject every token at once.
  * @module dsh-typst/scripts/style-tokens
  */
 
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(root, "tests", "fixtures", "style-tokens.json");
 const manifest = join(root, "package.json");
-const defaultThemeDir = join(
-  root,
-  "..",
-  "deepseek-harness",
+const require = createRequire(import.meta.url);
+const harnessRoot =
+  process.env.DSH_HARNESS_ROOT ?? join(root, "..", "deepseek-harness");
+const siblingThemeDir = join(
+  harnessRoot,
   "packages",
   "client",
   "ui-theme",
   "src",
   "styles",
 );
+const installedThemeDir = (() => {
+  try {
+    return join(
+      dirname(require.resolve("@deepseek-ai/dsh-client-ui-theme/package.json")),
+      "src",
+      "styles",
+    );
+  } catch {
+    return undefined;
+  }
+})();
+
+/**
+ * The version of the theme package the sheets actually come from. The pin is
+ * what the manifest declares; this is the version on disk that supplied the
+ * tokens. Recording the former under tokens read from the latter is how the
+ * snapshot's version anchor silently becomes false.
+ * @param themeDir - the theme's `src/styles` directory.
+ * @returns the package version, or null when it cannot be read.
+ */
+export function themeVersion(themeDir) {
+  try {
+    const value = JSON.parse(
+      readFileSync(join(themeDir, "..", "..", "package.json"), "utf8"),
+    ).version;
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The harness version the snapshot describes: the exact pin on the client
@@ -68,6 +102,61 @@ export function pinnedHarness(pkg) {
     pkg?.devDependencies?.["@deepseek-ai/dsh-client-ui-primitives"] ??
     ""
   );
+}
+
+/**
+ * The theme sheet directories to try. An explicit `DSH_THEME_DIR` is the only
+ * candidate then: a typo must fail instead of silently reading another
+ * checkout. Otherwise a sibling checkout comes first, with the installed
+ * pinned package as the fallback.
+ * @param options - overrides for the environment, sibling and installed paths.
+ * @returns the candidate directories, in priority order.
+ */
+export function themeDirCandidates({
+  env = process.env.DSH_THEME_DIR,
+  sibling = siblingThemeDir,
+  installed = installedThemeDir,
+} = {}) {
+  if (env) return [env];
+  return [sibling, installed].filter((dir) => dir !== undefined);
+}
+
+/**
+ * The first candidate that exists on disk.
+ * @param candidates - directories, in priority order.
+ * @param exists - existence probe, for tests.
+ * @returns the first existing directory, or undefined.
+ */
+export function firstExisting(candidates, exists = existsSync) {
+  return candidates.find((dir) => exists(dir));
+}
+
+/**
+ * The theme directory the check should read.
+ *
+ * A sibling checkout is a development convenience, not an authority: when it
+ * is ahead of the pin its sheets would describe a palette the plugin is not
+ * pinned to, so such a sibling is skipped and the installed pinned package
+ * supplies the names. An explicit `DSH_THEME_DIR` is never version-filtered —
+ * the pin-drift guard below still refuses to record a mismatched source.
+ * @param options - the pin, path overrides, and probes for tests.
+ * @returns the directory to read, or undefined when none exists.
+ */
+export function resolveThemeDir({
+  pin = "",
+  env = process.env.DSH_THEME_DIR,
+  sibling = siblingThemeDir,
+  installed = installedThemeDir,
+  exists = existsSync,
+  version = themeVersion,
+} = {}) {
+  if (env) return firstExisting([env], exists);
+  for (const dir of themeDirCandidates({ env, sibling, installed })) {
+    if (!exists(dir)) continue;
+    if (dir === sibling && pin !== "" && version(dir) !== pin) continue;
+    return dir;
+  }
+  return undefined;
 }
 
 /**
@@ -130,17 +219,40 @@ export function snapshotOf(current, { harness, dsw, ds = [] }) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const themeDir = process.env.DSH_THEME_DIR ?? defaultThemeDir;
+  const pin = pinnedHarness(JSON.parse(readFileSync(manifest, "utf8")));
+  const candidates = themeDirCandidates();
+  const themeDir = resolveThemeDir({ pin });
   let files;
   try {
+    if (themeDir === undefined) throw new Error("no theme directory");
     files = readdirSync(themeDir)
       .filter((name) => name.endsWith(".css"))
       .sort();
   } catch {
-    console.error(`style-tokens: no theme sheets at ${themeDir}`);
+    console.error(
+      `style-tokens: no theme sheets; tried ${candidates.join(", ")}`,
+    );
+    console.error(
+      "style-tokens: install @deepseek-ai/dsh-client-ui-theme or set DSH_THEME_DIR",
+    );
     process.exit(1);
   }
-  const harness = pinnedHarness(JSON.parse(readFileSync(manifest, "utf8")));
+  console.log(`style-tokens: theme sheets from ${themeDir}`);
+  const actual = themeVersion(themeDir);
+  const harness = actual ?? pin;
+  if (
+    actual !== null &&
+    pin !== "" &&
+    actual !== pin &&
+    process.argv.includes("--write") &&
+    !process.argv.includes("--allow-pin-drift")
+  ) {
+    console.error(
+      `style-tokens: the theme on disk is ${actual}, the manifest pin is ${pin};` +
+        " pass --allow-pin-drift to record the actual source version",
+    );
+    process.exit(1);
+  }
   const read = (name) => readFileSync(join(themeDir, name), "utf8");
   const dsw = mergeThemeTokens(read, files);
   const ds = mergeThemeTokens(read, files, "--ds-");

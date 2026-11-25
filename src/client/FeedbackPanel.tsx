@@ -1,8 +1,10 @@
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
+import { memo, useRef } from "react";
+import type { BakedActions } from "@deepseek-ai/dsh-client-store";
 import type { SnapshotView, TypstStateFrame } from "../contract.js";
 import type { FeedbackBridge } from "./conversation.js";
-import { useViewStore, type PreviewViewStore } from "./view-state.js";
-import { diagnosticText } from "./ProblemsPanel.js";
+import { diagnosticText } from "../diagnostic-text.js";
+import type { PreviewActions, PreviewState } from "./view-state.js";
 import {
   identityKey,
   errorText,
@@ -28,24 +30,35 @@ export function feedbackText(draft: FeedbackDraft): string {
     .filter(Boolean)
     .join("\n\n");
 }
-export function FeedbackPanel({
+export const FeedbackPanel = memo(function FeedbackPanel({
   draft,
   current,
   frame,
   bridge,
-  store,
+  tabId,
+  busy,
+  error,
+  progress,
+  set,
   t,
 }: {
   draft: FeedbackDraft;
   current: SnapshotView | null;
   frame: TypstStateFrame;
   bridge: FeedbackBridge;
-  store: PreviewViewStore;
   t: Translate;
+  tabId: string;
+  busy: boolean;
+  error: string | null;
+  progress: string;
+  set: (
+    run: (actions: BakedActions<PreviewState, PreviewActions>) => void,
+  ) => void;
 }) {
-  const { sending: busy, feedbackError: error, progress } = useViewStore(store);
+  const currentDraft = useRef(draft);
+  currentDraft.current = draft;
   const update = (change: Partial<FeedbackDraft>): void =>
-    store.update({ feedback: { ...draft, ...change } });
+    set((a) => a.patchFeedback(tabId, change));
   const stale =
     draft.snapshot &&
     (!current || identityKey(draft.snapshot) !== identityKey(current));
@@ -55,8 +68,12 @@ export function FeedbackPanel({
       draft.diagnostics.run !== frame.status.run ||
       draft.diagnostics.main !== frame.main);
   const submit = async (): Promise<void> => {
-    if (store.getSnapshot().sending) return;
-    store.update({ sending: true, feedbackError: null, progress: "" });
+    if (busy) return;
+    set((a) => {
+      a.setSending(tabId, true);
+      a.setFeedbackError(tabId, null);
+      a.setProgress(tabId, "");
+    });
     const controller = new AbortController();
     let accepted = false;
     try {
@@ -65,32 +82,36 @@ export function FeedbackPanel({
         feedbackText(draft),
         controller.signal,
         (loaded, total) =>
-          store.update({
-            progress: total
-              ? `${Math.round((loaded / total) * 100)}%`
-              : `${loaded}`,
-          }),
+          set((a) =>
+            a.setProgress(
+              tabId,
+              total ? `${Math.round((loaded / total) * 100)}%` : `${loaded}`,
+            ),
+          ),
         () => {
           if (accepted) return;
           accepted = true;
-          if (store.getSnapshot().feedback?.id === draft.id) {
-            draft.images.forEach((image) => URL.revokeObjectURL(image.url));
-            store.update({ feedback: null, notice: t("feedback.accepted") });
-          }
+          const live = currentDraft.current;
+          if (live.id !== draft.id) return;
+          live.images.forEach((image) => URL.revokeObjectURL(image.url));
+          set((a) => {
+            a.setFeedback(tabId, null);
+            a.setNotice(tabId, t("feedback.accepted"));
+          });
         },
       );
     } catch (failure) {
-      if (!accepted) store.update({ feedbackError: errorText(failure) });
+      if (!accepted) set((a) => a.setFeedbackError(tabId, errorText(failure)));
     } finally {
-      store.update({ sending: false });
+      set((a) => a.setSending(tabId, false));
     }
   };
   return (
     <section className={styles.feedback} aria-label={t("feedback.review")}>
-      <strong>{draft.title}</strong>
+      <span className={styles.feedbackTitle}>{draft.title}</span>
       <Button
         size="sm"
-        onClick={() => store.update({ feedbackExpanded: false })}
+        onClick={() => set((a) => a.setFeedbackExpanded(tabId, false))}
       >
         {t("feedback.hide")}
       </Button>
@@ -200,16 +221,22 @@ export function FeedbackPanel({
             size="sm"
             disabled={busy}
             onClick={() => {
-              store.update({ sending: true, feedbackError: null });
+              set((a) => {
+                a.setSending(tabId, true);
+                a.setFeedbackError(tabId, null);
+              });
               void bridge
                 .append(feedbackText(draft))
                 .then(() =>
-                  store.update({ notice: t("feedback.added"), feedback: null }),
+                  set((a) => {
+                    a.setNotice(tabId, t("feedback.added"));
+                    a.setFeedback(tabId, null);
+                  }),
                 )
                 .catch((failure) =>
-                  store.update({ feedbackError: errorText(failure) }),
+                  set((a) => a.setFeedbackError(tabId, errorText(failure))),
                 )
-                .finally(() => store.update({ sending: false }));
+                .finally(() => set((a) => a.setSending(tabId, false)));
             }}
           >
             {t("selection.addToChat")}
@@ -220,7 +247,7 @@ export function FeedbackPanel({
           disabled={busy}
           onClick={() => {
             draft.images.forEach((image) => URL.revokeObjectURL(image.url));
-            store.update({ feedback: null });
+            set((a) => a.setFeedback(tabId, null));
           }}
         >
           {t("action.discard")}
@@ -228,4 +255,4 @@ export function FeedbackPanel({
       </div>
     </section>
   );
-}
+});
