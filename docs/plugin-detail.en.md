@@ -1,0 +1,2 @@
+- **Core** (`dsh-typst`): local Typst discovery, watch lifecycle, exact snapshots, seven agent tools and the typst skill.
+- **Preview panel**: explicit main-file selection, continuous or single-page reading, responsive zoom, and bottom Outline, Problems and Annotations views. Append text to the main composer; review text or screenshot requests before submission. Agent locations notify first; state and drafts follow each tab.
