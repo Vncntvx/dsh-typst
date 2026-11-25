@@ -8,8 +8,12 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
+import { formatRetentionNotice } from "@deepseek-ai/dsh-output-retention";
 import { LIMITS } from "../constants.js";
 import type { DiagnosticView, StatusView } from "../contract.js";
+export { diagnosticText } from "../diagnostic-text.js";
+import { diagnosticText } from "../diagnostic-text.js";
+import { TYPST_NOT_COMPOSED, TypstError } from "../errors.js";
 import type { TypstWorkbenchService } from "../service.js";
 import { WorkspaceSession } from "../workspace/session.js";
 
@@ -27,8 +31,9 @@ export async function sessionOfExec(
 ): Promise<WorkspaceSession> {
   const workingDirectory = ctx.get("workingDirectory");
   if (workingDirectory === undefined) {
-    throw new Error(
+    throw new TypstError(
       "The working-directory service is not composed; cannot resolve the workspace.",
+      TYPST_NOT_COMPOSED,
     );
   }
   const cwd = exec.agent
@@ -37,38 +42,30 @@ export async function sessionOfExec(
   return service.sessionFor(cwd);
 }
 
-/** Model-facing rendering of one diagnostic: location, excerpt, hints, trace. */
-export function diagnosticText(diagnostic: DiagnosticView): string {
-  const lines: string[] = [
-    `${diagnostic.severity}: ${diagnostic.message}`,
-    `  at ${formatLocation(diagnostic.location)}`,
-  ];
-  if (diagnostic.excerpt !== undefined)
-    lines.push(`  | ${diagnostic.excerpt.trim()}`);
-  for (const hint of diagnostic.hints) lines.push(`  hint: ${hint}`);
-  for (const point of diagnostic.trace) {
-    lines.push(`  from ${formatLocation(point.location)}: ${point.message}`);
-  }
-  return lines.join("\n");
-}
-
-function formatLocation(
-  location: { file: string; line: number; column: number } | null,
-): string {
-  return location
-    ? `${location.file}:${location.line}:${location.column}`
-    : "(no location)";
-}
-
-/** The diagnostics block, capped at LIMITS.diagnostics entries. */
+/** The diagnostics block, with any frame-level truncation named explicitly. */
 export function diagnosticsText(
   diagnostics: DiagnosticView[],
-  limit = LIMITS.diagnostics,
+  limit: number = LIMITS.diagnostics,
+  total: number = diagnostics.length,
 ): string {
-  const shown = diagnostics.slice(0, limit);
-  const more = diagnostics.length - shown.length;
+  const cap = Math.max(0, limit);
+  const shown = diagnostics.slice(0, cap);
+  const full = Math.max(total, diagnostics.length);
+  const omitted = full - shown.length;
   const body = shown.map(diagnosticText).join("\n\n");
-  return body + (more > 0 ? `\n\n… and ${more} more.` : "");
+  if (omitted <= 0) return body;
+  const footer = formatRetentionNotice(
+    {
+      scope: "typst-diagnostics",
+      strategy: "head",
+      unit: "items",
+      limit: cap,
+      kept: shown.length,
+      omitted: { kind: "exact", count: omitted },
+    },
+    () => `${full} diagnostics in total.`,
+  );
+  return [body, footer].filter((part) => part.length > 0).join("\n\n");
 }
 
 export function countOf(diagnostics: DiagnosticView[]): {
@@ -90,8 +87,12 @@ export function compileSummary(
   main: string | null,
   diagnostics: DiagnosticView[],
   pages: number | undefined,
+  diagnosticsTotal = diagnostics.length,
 ): string {
   const { errors, warnings } = countOf(diagnostics);
+  const hidden = diagnosticsTotal - diagnostics.length;
+  const hiddenText =
+    hidden > 0 ? ` Showing ${diagnostics.length} of ${diagnosticsTotal}.` : "";
   const time =
     status.durationMs !== undefined
       ? ` in ${status.durationMs < 10 ? status.durationMs.toFixed(1) : Math.round(status.durationMs)} ms`
@@ -99,11 +100,11 @@ export function compileSummary(
   const pagesText = pages !== undefined ? ` — ${plural(pages, "page")}` : "";
   switch (status.phase) {
     case "ok":
-      return `${main} compiled successfully${time}${pagesText}. No errors or warnings.`;
+      return `${main} compiled successfully${time}${pagesText}. No errors or warnings.${hiddenText}`;
     case "warnings":
-      return `${main} compiled with ${plural(warnings, "warning")}${time}${pagesText}.`;
+      return `${main} compiled with ${plural(warnings, "warning")}${time}${pagesText}.${hiddenText}`;
     case "error":
-      return `${main} failed to compile: ${plural(errors, "error")}${warnings ? ` and ${plural(warnings, "warning")}` : ""}.${pages !== undefined ? ` The preview still shows the last successful version (${plural(pages, "page")}).` : " There is no preview yet."}`;
+      return `${main} failed to compile: ${plural(errors, "error")}${warnings ? ` and ${plural(warnings, "warning")}` : ""}.${pages !== undefined ? ` The preview still shows the last successful version (${plural(pages, "page")}).` : " There is no preview yet."}${hiddenText}`;
     case "compiling":
     case "starting":
       return `${main} is compiling…`;

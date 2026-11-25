@@ -33,6 +33,8 @@ import type {
 import {
   TYPST_LOCATE_SOURCE_METHOD,
   TYPST_READ_PREVIEW_METHOD,
+  TYPST_REMOTE_PACKAGE,
+  TYPST_SCOPE_WIRE_SYMBOL,
   TYPST_SET_MAIN_METHOD,
   TYPST_STATUS_METHOD,
   TYPST_STATUS_SERVICE_KEY,
@@ -54,6 +56,11 @@ export function strictCodec(
   schema: z.ZodType,
 ): TypertCodec {
   return { mode: "strict", typeSymbol, create: () => schema };
+}
+
+/** The boundary symbol of a type this package owns. */
+function typstTypeSymbol(name: string): string {
+  return `${TYPST_REMOTE_PACKAGE}#${name}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +182,8 @@ export const highlightSchema = z
     source: sourceRefSchema.optional(),
     seq: z.number().int(),
     pageIndex: z.number().int(),
+    startOffset: z.number().int().optional(),
+    occurrence: z.number().int().optional(),
     rects: z.array(z.array(z.number())),
     stale: z.boolean(),
     createdAt: z.number(),
@@ -237,11 +246,14 @@ export const typstStateFrameSchema = z
       .strict(),
     toolchain: toolchainSchema,
     workspace: z.string(),
+    workspaceRoot: z.string(),
     main: z.string().nullable(),
     candidates: z.array(z.string()),
     fragments: z.array(z.string()),
     status: statusSchema,
     diagnostics: z.array(diagnosticSchema),
+    diagnosticsTotal: z.number().int(),
+    diagnosticsTruncated: z.boolean(),
     snapshot: snapshotSchema.nullable(),
     highlights: z.array(highlightSchema),
     view: z.union([panelViewSchema, z.null()]),
@@ -272,11 +284,9 @@ export const previewBytesSchema = z
     generation: z.number().int(),
     seq: z.number().int(),
     sha256: z.string(),
-    data: z.custom<Uint8Array>(),
+    data: z.instanceof(Uint8Array),
   })
   .strict();
-
-export const recheckResultSchema = typstStateFrameSchema;
 
 // ---------------------------------------------------------------------------
 // Invocation descriptors
@@ -314,6 +324,7 @@ function bytesCodec(
         [byteField]: writeBytes(data as Uint8Array, [byteField]),
       };
     },
+    decode: (value) => schema.parse(value),
   };
 }
 
@@ -324,13 +335,13 @@ function scopeParameter(): InvocationDescriptor["parameters"][number] {
     wire: "typstScopeId",
     source: "lookup",
     lookup: "typstScope",
-    codec: strictCodec("@deepseek-ai/dsh-typst#TypstScopeId", z.string()),
+    codec: strictCodec(TYPST_SCOPE_WIRE_SYMBOL, z.string()),
   };
 }
 
 /** The typst state frame result codec, shared by `status`, `watch`, and `recheck`. */
 export const stateFrameCodec = resultCodec(
-  "@deepseek-ai/dsh-typst/types#TypstStateFrame",
+  typstTypeSymbol("TypstStateFrame"),
   typstStateFrameSchema,
 );
 
@@ -361,13 +372,13 @@ export const typstSetMainInvocation: InvocationDescriptor = {
       wire: "path",
       source: "json",
       codec: strictCodec(
-        "@deepseek-ai/dsh-typst#setMain.path",
+        typstTypeSymbol("typst/setMain:path"),
         z.string().min(1).max(1024),
       ),
     },
   ],
   result: resultCodec(
-    "@deepseek-ai/dsh-typst/types#SetMainResult",
+    typstTypeSymbol("typst/setMain:result"),
     setMainResultSchema,
   ),
 };
@@ -405,11 +416,14 @@ export const typstReadPreviewInvocation: InvocationDescriptor = {
       name: "identity",
       wire: "identity",
       source: "json",
-      codec: strictCodec("dsh-typst#PreviewIdentity", previewIdentitySchema),
+      codec: strictCodec(
+        typstTypeSymbol("PreviewIdentity"),
+        previewIdentitySchema,
+      ),
     },
   ],
   result: bytesCodec(
-    "@deepseek-ai/dsh-typst/types#PreviewBytes",
+    typstTypeSymbol("PreviewBytes"),
     previewBytesSchema,
     "data",
   ),
@@ -430,7 +444,7 @@ export const typstLocateSourceInvocation: InvocationDescriptor = {
       wire: "text",
       source: "json",
       codec: strictCodec(
-        "@deepseek-ai/dsh-typst#locateSource.text",
+        typstTypeSymbol("typst/locateSource:text"),
         z.string().min(1).max(20_000),
       ),
     },
@@ -439,13 +453,13 @@ export const typstLocateSourceInvocation: InvocationDescriptor = {
       wire: "focus",
       source: "json",
       codec: strictCodec(
-        "@deepseek-ai/dsh-typst#locateSource.focus",
+        typstTypeSymbol("typst/locateSource:focus"),
         z.string().min(1).max(20_000).nullable(),
       ),
     },
   ],
   result: resultCodec(
-    "@deepseek-ai/dsh-typst/types#LocateSourceResult",
+    typstTypeSymbol("typst/locateSource:result"),
     locateSourceResultSchema,
   ),
 };
@@ -488,10 +502,22 @@ export const typstDiscoverInvocation: InvocationDescriptor = {
       name: "includeExcluded",
       wire: "includeExcluded",
       source: "json",
-      codec: strictCodec("dsh-typst#discover.includeExcluded", z.boolean()),
+      codec: strictCodec(
+        typstTypeSymbol("typst/discover:includeExcluded"),
+        z.boolean(),
+      ),
     },
   ],
-  result: resultCodec("dsh-typst#DiscoverResult", z.object({}).strict()),
+  result: resultCodec(
+    typstTypeSymbol("typst/discover:result"),
+    z
+      .object({
+        candidates: z.number().int(),
+        includeExcluded: z.boolean(),
+        errors: z.array(z.string()),
+      })
+      .strict(),
+  ),
 };
 
 /** Both halves register exactly this list. */

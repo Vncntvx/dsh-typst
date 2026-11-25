@@ -2,8 +2,9 @@
  * The host Typert Remote runtime for the `typst` namespace: state frames,
  * the live watch stream, preview bytes, file discovery, and source
  * matching, all scoped to the calling Session's workspace through the
- * `typstScope` lookup (the `workspaceFileScope` pattern from
- * `@deepseek-ai/dsh-api-workspace-files`). Host half only.
+ * `typstScope` lookup, adapted from the `workspaceFileScope` lookup shape in
+ * `@deepseek-ai/dsh-api-workspace-files` (that package is a reference, not a
+ * dependency of this plugin). Host half only.
  * @module dsh-typst/remote
  */
 
@@ -18,12 +19,14 @@ import {
   TYPST_SETTINGS_NAMESPACE,
 } from "./constants.js";
 import type {
+  DiscoveryView,
   PreviewIdentity,
   PreviewBytes,
   TypstStateFrame,
 } from "./contract.js";
 import {
   domainCall,
+  rethrowRemote,
   TYPST_NOT_COMPOSED_MESSAGE,
   TypstError,
   TYPST_NOT_COMPOSED,
@@ -100,6 +103,7 @@ export class TypstRuntime extends TypertRemoteService {
       const session = await this.workbench().sessionFor(
         typstScope.workspaceRoot,
       );
+      signal.throwIfAborted();
       const main = await session.setMain(path);
       return { main };
     });
@@ -125,13 +129,24 @@ export class TypstRuntime extends TypertRemoteService {
       return workspaceSession;
     });
     session.watchSetup(true);
+    signal.throwIfAborted();
+    // Subscribe before the first snapshot: the generator registers its
+    // listener on the first next(), and a change that lands while the first
+    // frame is being written must not be lost.
+    const changes = session.onChangeWaiter(signal) as AsyncGenerator<symbol>;
+    const wake = changes.next();
     try {
-      const queue = session.state();
-      yield queue;
-      for await (const _ of session.onChangeWaiter(signal)) {
+      yield session.state();
+      let next = await wake;
+      while (!next.done) {
         yield session.state();
+        next = await changes.next();
       }
+    } catch (error) {
+      // Preserve the stream failure's own `typst/<reason>` code on the wire.
+      rethrowRemote(error);
     } finally {
+      await changes.return(undefined);
       session.watchSetup(false);
     }
   }
@@ -152,7 +167,10 @@ export class TypstRuntime extends TypertRemoteService {
         generation: info.generation,
         seq: info.seq,
         sha256: info.sha256,
-        data: Uint8Array.from(bytes),
+        // The gateway's writeBytes records this view for the RPC attachment;
+        // it never transfers or detaches it, so the retained snapshot stays
+        // readable for later page extraction and highlight relocation.
+        data: bytes,
       };
     });
   }
@@ -169,7 +187,11 @@ export class TypstRuntime extends TypertRemoteService {
       const session = await this.workbench().sessionFor(
         typstScope.workspaceRoot,
       );
-      const matches = await session.locateSource(text, focus ?? undefined);
+      const matches = await session.locateSource(
+        text,
+        focus ?? undefined,
+        signal,
+      );
       return { matches };
     });
   }
@@ -184,6 +206,7 @@ export class TypstRuntime extends TypertRemoteService {
       const session = await this.workbench().sessionFor(
         typstScope.workspaceRoot,
       );
+      signal.throwIfAborted();
       await session.recheck(true);
       return session.state();
     });
@@ -199,6 +222,7 @@ export class TypstRuntime extends TypertRemoteService {
       const session = await this.workbench().sessionFor(
         typstScope.workspaceRoot,
       );
+      signal.throwIfAborted();
       await session.restart();
       return session.state();
     });
@@ -209,14 +233,20 @@ export class TypstRuntime extends TypertRemoteService {
     typstScope: TypstScope,
     includeExcluded: boolean,
     signal: AbortSignal,
-  ): Promise<object> {
+  ): Promise<DiscoveryView> {
     signal.throwIfAborted();
     return domainCall(async () => {
       const session = await this.workbench().sessionFor(
         typstScope.workspaceRoot,
       );
+      signal.throwIfAborted();
       await session.discover(includeExcluded, signal);
-      return {};
+      const frame = session.state();
+      return {
+        candidates: frame.candidates.length,
+        includeExcluded,
+        errors: frame.discovery.errors,
+      };
     });
   }
 }

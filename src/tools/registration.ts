@@ -5,16 +5,28 @@
  * JSON output plus a model-facing render, one registration effect per tool).
  * Host half only.
  *
- * `typst_render_pages` returns base64 PNGs in its canonical value and the
- * client's `tool.call.toolview` view displays them inline; the model-facing
- * render stays text (the canonical JSON is persistence and toolview data).
+ * `typst_render_pages` returns durable attachment references in its canonical
+ * value and the client's `tool.call.toolview` view displays them inline; the
+ * model-facing render stays text (the canonical JSON is persistence and
+ * toolview data).
  * @module dsh-typst/tools/registration
  */
 
 import type { Context } from "@deepseek-ai/cordis";
+import type {} from "@deepseek-ai/dsh-attachment";
+import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
+import type {} from "@deepseek-ai/dsh-sandbox-policy";
 import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
-import type { JsonValue } from "@deepseek-ai/dsh-util-values";
 import { LIMITS } from "../constants.js";
+import type { DiagnosticView } from "../contract.js";
+import {
+  TYPST_ATTACHMENT_UNAVAILABLE,
+  TYPST_COMPILE_FAILED,
+  TYPST_INVALID_ARGUMENT,
+  TYPST_INVALID_TARGET,
+  TYPST_NOT_COMPOSED,
+  TypstError,
+} from "../errors.js";
 import type { TypstWorkbenchService } from "../service.js";
 import { WorkspaceSession } from "../workspace/session.js";
 import {
@@ -55,9 +67,14 @@ function summarize(session: WorkspaceSession): SessionSummary {
       state.main,
       state.diagnostics,
       pages ?? undefined,
+      state.diagnosticsTotal,
     ),
     problems: state.diagnostics.length
-      ? diagnosticsText(state.diagnostics)
+      ? diagnosticsText(
+          state.diagnostics,
+          LIMITS.diagnostics,
+          state.diagnosticsTotal,
+        )
       : "",
   };
 }
@@ -73,6 +90,20 @@ function stripAbsent<T extends object>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as T;
+}
+
+/** One file location for a tool card's editor follow-along, or none. */
+function fileLocations(
+  path: unknown,
+  line?: unknown,
+): { path: string; line?: number }[] | undefined {
+  if (typeof path !== "string" || path.length === 0) return undefined;
+  return [
+    {
+      path,
+      ...(typeof line === "number" && Number.isInteger(line) ? { line } : {}),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -93,9 +124,24 @@ function typstStatusTool(ctx: Context, service: TypstWorkbenchService) {
         type: "object",
         properties: {
           toolchain: {
-            type: "json",
+            type: "object",
             required: true,
+            additionalProperties: false,
             description: "Typst toolchain state view.",
+            properties: {
+              state: {
+                type: "string",
+                required: true,
+                enum: ["ready", "missing", "too_old", "error"],
+              },
+              version: { type: "string" },
+              path: { type: "string" },
+              source: {
+                type: "string",
+                enum: ["setting", "path", "common", "shell"],
+              },
+              error: { type: "string" },
+            },
           },
           main: {
             type: "string",
@@ -123,7 +169,32 @@ function typstStatusTool(ctx: Context, service: TypstWorkbenchService) {
         },
         additionalProperties: false,
       },
-      render: (_args, value) => [{ type: "text", text: value.summary }],
+      render: (_args, value) => {
+        const toolchain = value.toolchain as {
+          state?: string;
+          version?: string;
+          path?: string;
+          source?: string;
+          error?: string;
+        };
+        const install =
+          toolchain?.state === "ready"
+            ? `typst ${toolchain.version} at ${toolchain.path} (${toolchain.source})`
+            : `typst ${toolchain?.state ?? "unknown"}${toolchain?.error ? ` — ${toolchain.error}` : ""}`;
+        const candidates =
+          value.candidates.length > 0 ? value.candidates.join(", ") : "(none)";
+        return [
+          {
+            type: "text",
+            text: [
+              install,
+              `main: ${value.main ?? "(none)"}`,
+              `candidates: ${candidates}`,
+              value.summary,
+            ].join("\n"),
+          },
+        ];
+      },
     },
     presentCall: () => ({ card: "generic", title: "Typst status" }),
     isConcurrencySafe: () => true,
@@ -133,7 +204,7 @@ function typstStatusTool(ctx: Context, service: TypstWorkbenchService) {
       const state = session.state();
       const summary = summarize(session);
       return stripAbsent({
-        toolchain: state.toolchain as unknown as JsonValue,
+        toolchain: state.toolchain,
         ...(state.main !== null ? { main: state.main } : {}),
         candidates: state.candidates,
         phase: summary.phase,
@@ -172,6 +243,16 @@ function typstSetMainTool(ctx: Context, service: TypstWorkbenchService) {
           phase: { type: "string", required: true },
           errors: { type: "integer", required: true },
           warnings: { type: "integer", required: true },
+          settled: {
+            type: "boolean",
+            required: true,
+            description:
+              "Whether the new main file finished compiling within the check budget.",
+          },
+          reason: {
+            type: "string",
+            description: "Why waiting for the new main file to compile failed.",
+          },
           summary: { type: "string", required: true },
         },
         additionalProperties: false,
@@ -182,19 +263,32 @@ function typstSetMainTool(ctx: Context, service: TypstWorkbenchService) {
       card: "generic",
       title: "Set Typst main file",
       rawInput: String(args.path ?? ""),
+      locations: fileLocations(args.path),
     }),
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const session = await sessionOfExec(ctx, exec, service);
       const main = await session.setMain(args.path);
-      await session.settle(LIMITS.checkTimeoutMs).catch(() => undefined);
+      let settled = true;
+      let reason: string | undefined;
+      try {
+        await session.settle(LIMITS.checkTimeoutMs, exec.signal);
+      } catch (error) {
+        if (exec.signal.aborted) throw error;
+        settled = false;
+        reason = error instanceof Error ? error.message : String(error);
+      }
       const summary = summarize(session);
       return {
         main,
         phase: summary.phase,
         errors: summary.errors,
         warnings: summary.warnings,
-        summary: textOf(summary),
+        settled,
+        ...(reason !== undefined ? { reason } : {}),
+        summary: settled
+          ? textOf(summary)
+          : `${summary.summary}\n\nCould not wait for the new main file to compile: ${reason ?? "unknown error"}`,
       };
     },
   });
@@ -230,13 +324,82 @@ function typstCheckTool(ctx: Context, service: TypstWorkbenchService) {
           durationMs: { type: "integer", description: "Compile duration." },
           summary: { type: "string", required: true },
           diagnostics: {
-            type: "json",
-            description: "The full diagnostic views.",
+            type: "array",
+            description: "The bounded diagnostic views for the latest compile.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                severity: {
+                  type: "string",
+                  required: true,
+                  enum: ["error", "warning"],
+                },
+                message: { type: "string", required: true },
+                location: {
+                  oneOf: [
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        file: { type: "string", required: true },
+                        line: { type: "integer", required: true },
+                        column: { type: "integer", required: true },
+                      },
+                    },
+                    { type: "null" },
+                  ],
+                },
+                excerpt: { type: "string" },
+                hints: { type: "array", items: { type: "string" } },
+                trace: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      message: { type: "string", required: true },
+                      location: {
+                        oneOf: [
+                          {
+                            type: "object",
+                            additionalProperties: false,
+                            properties: {
+                              file: { type: "string", required: true },
+                              line: { type: "integer", required: true },
+                              column: { type: "integer", required: true },
+                            },
+                          },
+                          { type: "null" },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          diagnosticsTotal: {
+            type: "integer",
+            required: true,
+            description: "Total diagnostics before truncation.",
+          },
+          diagnosticsTruncated: {
+            type: "boolean",
+            required: true,
+            description: "Whether the diagnostic cap omitted any entries.",
           },
         },
         additionalProperties: false,
       },
-      render: (_args, value) => [{ type: "text", text: value.summary }],
+      render: (_args, value) => {
+        const diagnostics = Array.isArray(value.diagnostics)
+          ? (value.diagnostics as unknown as DiagnosticView[])
+          : [];
+        const body =
+          diagnostics.length > 0 ? `\n\n${diagnosticsText(diagnostics)}` : "";
+        return [{ type: "text", text: `${value.summary}${body}` }];
+      },
     },
     presentCall: () => ({ card: "generic", title: "Check Typst document" }),
     isConcurrencySafe: () => true,
@@ -246,7 +409,7 @@ function typstCheckTool(ctx: Context, service: TypstWorkbenchService) {
         typeof args.timeoutMs === "number" && Number.isFinite(args.timeoutMs)
           ? Math.min(Math.max(args.timeoutMs, 1_000), 600_000)
           : LIMITS.checkTimeoutMs;
-      await session.settle(timeoutMs);
+      await session.settle(timeoutMs, exec.signal);
       const state = session.state();
       const summary = summarize(session);
       return stripAbsent({
@@ -259,7 +422,9 @@ function typstCheckTool(ctx: Context, service: TypstWorkbenchService) {
           ? { durationMs: Math.round(summary.durationMs) }
           : {}),
         summary: summary.summary,
-        diagnostics: state.diagnostics as unknown as JsonValue,
+        diagnostics: state.diagnostics,
+        diagnosticsTotal: state.diagnosticsTotal,
+        diagnosticsTruncated: state.diagnosticsTruncated,
       });
     },
   });
@@ -311,39 +476,49 @@ function typstRenderPagesTool(ctx: Context, service: TypstWorkbenchService) {
               additionalProperties: false,
               properties: {
                 page: { type: "integer", required: true },
-                dataUrl: { type: "string", required: true },
+                attachment: {
+                  type: "object",
+                  required: true,
+                  additionalProperties: false,
+                  properties: {
+                    attachmentId: { type: "string", required: true },
+                    mediaType: { type: "string", required: true },
+                    bytes: { type: "integer", required: true },
+                    width: { type: "integer", required: true },
+                    height: { type: "integer", required: true },
+                    name: { type: "string" },
+                  },
+                },
               },
             },
-            description: "Rendered PNGs for the tool card.",
+            description: "Durable PNG attachments for the model and the card.",
           },
         },
         additionalProperties: false,
       },
       render: (_args, value) => {
-        const images = value.images as { page: number }[];
+        const images = value.images;
         const rendered = images.map((image) => `page ${image.page}`).join(", ");
         const total = value.total !== undefined ? ` of ${value.total}` : "";
         return [
-          {
-            type: "text",
-            text: `Rendered ${rendered}${total}. The images are on the tool card.`,
-          },
+          { type: "text", text: `Rendered ${rendered}${total}.` },
+          ...images.map((image) => ({
+            type: "image" as const,
+            attachment: image.attachment as unknown as ImageAttachmentRef,
+          })),
         ];
       },
-      // The card's data channel: bounded so a pathological render cannot
-      // bloat the replay record (the toolview shows text above the cap).
-      presentationMeta: (_args, value) => {
-        const images = value.images;
-        const bytes = images.reduce(
-          (sum, image) => sum + image.dataUrl.length,
-          0,
-        );
-        return {
-          pages: value.pages,
-          ...(value.total !== undefined ? { total: value.total } : {}),
-          images: bytes > 6_000_000 ? [] : images,
-        };
-      },
+      // The card's data channel: durable references only. The attachment
+      // service stores the bytes; the settled content's image blocks are the
+      // model-facing copy, so repeating base64 here would double the record.
+      presentationMeta: (_args, value) => ({
+        pages: value.pages,
+        ...(value.total !== undefined ? { total: value.total } : {}),
+        images: value.images.map((image) => ({
+          page: image.page,
+          attachment: image.attachment,
+        })),
+      }),
     },
     presentCall: (args) => ({
       card: "generic",
@@ -357,21 +532,34 @@ function typstRenderPagesTool(ctx: Context, service: TypstWorkbenchService) {
         typeof args.ppi === "number" && Number.isFinite(args.ppi)
           ? Math.min(Math.max(args.ppi, LIMITS.ppiMin), LIMITS.ppiMax)
           : LIMITS.ppiDefault;
-      const result = await session.renderPages(args.pages, ppi);
+      const result = await session.renderPages(args.pages, ppi, exec.signal);
       if (!result.ok) {
-        const error = new Error(
+        throw new TypstError(
           `The document does not compile, so no pages were rendered.\n\n${diagnosticsText(result.diagnostics)}`,
+          TYPST_COMPILE_FAILED,
         );
-        error.name = "TYPST_COMPILE_FAILED";
-        throw error;
       }
+      const attachments = ctx.get("attachments");
+      if (attachments === undefined) {
+        throw new TypstError(
+          "The attachment store is not composed, so rendered pages cannot be returned to the model.",
+          TYPST_ATTACHMENT_UNAVAILABLE,
+        );
+      }
+      const images = await Promise.all(
+        result.images.map(async (image) => ({
+          page: image.page,
+          attachment: await attachments.saveImage({
+            data: image.png,
+            mediaType: "image/png",
+            name: `page-${image.page}.png`,
+          }),
+        })),
+      );
       return stripAbsent({
         pages: result.pages,
         ...(result.total !== undefined ? { total: result.total } : {}),
-        images: result.images.map((image) => ({
-          page: image.page,
-          dataUrl: `data:image/png;base64,${Buffer.from(image.png).toString("base64")}`,
-        })),
+        images,
       });
     },
   });
@@ -424,7 +612,9 @@ function typstShowTool(ctx: Context, service: TypstWorkbenchService) {
         {
           type: "text",
           text: value.highlighted
-            ? "Highlighted in the preview."
+            ? value.exact === false
+              ? "Highlighted in the preview (approximate match; quote the rendered words for an exact one)."
+              : "Highlighted in the preview."
             : `Requested viewing page ${value.page}; the user can open the location notification.`,
         },
       ],
@@ -437,10 +627,72 @@ function typstShowTool(ctx: Context, service: TypstWorkbenchService) {
           args.file ??
           (args.page !== undefined ? `page ${args.page}` : ""),
       ),
+      locations: fileLocations(args.file, args.line),
     }),
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const session = await sessionOfExec(ctx, exec, service);
+      await session.activate();
+      const hasPage = args.page !== undefined;
+      const hasQuote = args.quote !== undefined;
+      const hasFile = args.file !== undefined;
+      const targets = [hasPage, hasQuote, hasFile].filter(Boolean).length;
+      if (targets !== 1) {
+        throw new TypstError(
+          "Give exactly one target: page, quote, or file (with line).",
+          TYPST_INVALID_TARGET,
+        );
+      }
+      if (hasPage && (!Number.isInteger(args.page) || (args.page ?? 0) < 1)) {
+        throw new TypstError(
+          "page must be an integer of at least 1.",
+          TYPST_INVALID_TARGET,
+        );
+      }
+      if (
+        hasQuote &&
+        args.quote !== undefined &&
+        args.quote.trim().length === 0
+      ) {
+        throw new TypstError(
+          "quote must contain the rendered words to highlight.",
+          TYPST_INVALID_TARGET,
+        );
+      }
+      if (hasFile) {
+        if (typeof args.file !== "string" || args.file.length === 0) {
+          throw new TypstError(
+            "file must be a workspace-relative .typ path.",
+            TYPST_INVALID_TARGET,
+          );
+        }
+        if (args.line === undefined) {
+          throw new TypstError(
+            "file needs a 1-based line.",
+            TYPST_INVALID_TARGET,
+          );
+        }
+        if (!Number.isInteger(args.line) || args.line < 1) {
+          throw new TypstError(
+            "line must be an integer of at least 1.",
+            TYPST_INVALID_TARGET,
+          );
+        }
+        if (
+          args.endLine !== undefined &&
+          (!Number.isInteger(args.endLine) || args.endLine < args.line)
+        ) {
+          throw new TypstError(
+            "endLine must be an integer not smaller than line.",
+            TYPST_INVALID_TARGET,
+          );
+        }
+      }
+      if (session.state().snapshot === null) {
+        await session
+          .settle(LIMITS.checkTimeoutMs, exec.signal)
+          .catch(() => undefined);
+      }
       if (typeof args.page === "number") {
         session.showPage(args.page - 1);
         return { highlighted: false, page: args.page };
@@ -479,7 +731,8 @@ function typstClearHighlightsTool(
       "Remove the highlights you placed in the live preview (all of them, or the named ids).",
     parameters: {
       ids: {
-        type: "json",
+        type: "array",
+        items: { type: "string" },
         description: "Highlight ids to remove; omit to remove all.",
       },
     },
@@ -498,10 +751,19 @@ function typstClearHighlightsTool(
     async execute(args, exec) {
       const session = await sessionOfExec(ctx, exec, service);
       const ids = args.ids;
-      const removed = session.clearHighlights(
-        Array.isArray(ids) ? ids.map(String) : undefined,
-      );
-      return { removed };
+      if (ids !== undefined) {
+        if (
+          !Array.isArray(ids) ||
+          ids.length === 0 ||
+          !ids.every((id) => typeof id === "string" && id.length > 0)
+        ) {
+          throw new TypstError(
+            "ids must be a non-empty array of highlight ids; omit it to remove all highlights.",
+            TYPST_INVALID_ARGUMENT,
+          );
+        }
+      }
+      return { removed: session.clearHighlights(ids) };
     },
   });
 }
@@ -564,22 +826,37 @@ function typstExportPdfTool(ctx: Context, service: TypstWorkbenchService) {
       card: "generic",
       title: "Export Typst PDF",
       rawInput: String(args.path ?? ""),
+      locations: fileLocations(args.path),
     }),
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const session = await sessionOfExec(ctx, exec, service);
-      const result = await session.exportPdf(args.path, {
-        ...(typeof args.pdfStandard === "string"
-          ? { pdfStandard: args.pdfStandard }
-          : {}),
-        ...(typeof args.pages === "string" ? { pages: args.pages } : {}),
-      });
-      if (!result.ok) {
-        const error = new Error(
-          `The PDF export failed.\n\n${diagnosticsText(result.diagnostics)}`,
+      const policyService = ctx.get("sandboxPolicy");
+      if (policyService === undefined) {
+        throw new TypstError(
+          "The sandbox policy service is not composed; refusing to write a PDF.",
+          TYPST_NOT_COMPOSED,
         );
-        error.name = "TYPST_COMPILE_FAILED";
-        throw error;
+      }
+      const policy = policyService.resolve(
+        exec.agent === undefined ? {} : { session: exec.agent.session },
+      );
+      const result = await session.exportPdf(
+        args.path,
+        {
+          ...(typeof args.pdfStandard === "string"
+            ? { pdfStandard: args.pdfStandard }
+            : {}),
+          ...(typeof args.pages === "string" ? { pages: args.pages } : {}),
+        },
+        exec.signal,
+        policy,
+      );
+      if (!result.ok) {
+        throw new TypstError(
+          `The PDF export failed.\n\n${diagnosticsText(result.diagnostics)}`,
+          TYPST_COMPILE_FAILED,
+        );
       }
       return stripAbsent({
         path: result.path,

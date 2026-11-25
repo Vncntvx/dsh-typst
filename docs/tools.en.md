@@ -55,17 +55,19 @@ Chooses the main `.typ` file, the one you would hand to `typst compile`. The pre
 
 ### Output
 
-| Field      | Type   | Meaning                              |
-| ---------- | ------ | ------------------------------------ |
-| `main`     | string | The chosen main file                 |
-| `phase`    | string | The compile phase                    |
-| `errors`   | int    | The error count                      |
-| `warnings` | int    | The warning count                    |
-| `summary`  | string | The compile summary and the problems |
+| Field      | Type   | Meaning                                                    |
+| ---------- | ------ | ---------------------------------------------------------- |
+| `main`     | string | The chosen main file                                       |
+| `phase`    | string | The compile phase                                          |
+| `errors`   | int    | The error count                                            |
+| `warnings` | int    | The warning count                                          |
+| `settled`  | bool   | Whether the new main file compiled within the check budget |
+| `reason`   | string | Why waiting failed, when applicable                        |
+| `summary`  | string | The compile summary and the problems                       |
 
 ### Notes
 
-The path must stay inside the workspace; an escaping path is refused with `TYPST_PATH_OUTSIDE_WORKSPACE`. The call waits for one settle, so the summary already reflects the compile of the new main file.
+The path must stay inside the workspace. An escaping path is refused with `TYPST_PATH_OUTSIDE_WORKSPACE`. The call waits for the new main file to compile. If waiting times out or otherwise fails, it returns `settled: false` and `reason`, and the summary reports the failure.
 
 ### Example
 
@@ -89,20 +91,22 @@ It waits until every change already on disk has compiled before returning, so ca
 
 ### Output
 
-| Field         | Type     | Meaning                                                                        |
-| ------------- | -------- | ------------------------------------------------------------------------------ |
-| `main`        | string   | The main file; absent when none is chosen                                      |
-| `phase`       | string   | The compile phase                                                              |
-| `errors`      | int      | The error count                                                                |
-| `warnings`    | int      | The warning count                                                              |
-| `pages`       | int      | The preview page count; absent until a compile succeeded                       |
-| `durationMs`  | int      | The compile duration                                                           |
-| `summary`     | string   | A one-line compile summary                                                     |
-| `diagnostics` | object[] | The full diagnostic views: locations, source lines, `hint:` lines, call traces |
+| Field                  | Type     | Meaning                                                                                         |
+| ---------------------- | -------- | ----------------------------------------------------------------------------------------------- |
+| `main`                 | string   | The main file; absent when none is chosen                                                       |
+| `phase`                | string   | The compile phase                                                                               |
+| `errors`               | int      | The error count                                                                                 |
+| `warnings`             | int      | The warning count                                                                               |
+| `pages`                | int      | The preview page count; absent until a compile succeeded                                        |
+| `durationMs`           | int      | The compile duration                                                                            |
+| `summary`              | string   | A one-line compile summary                                                                      |
+| `diagnostics`          | object[] | This round's diagnostic views (at most 30): locations, source lines, `hint:` lines, call traces |
+| `diagnosticsTotal`     | int      | Total diagnostics in the round, before truncation                                               |
+| `diagnosticsTruncated` | bool     | Whether the cap truncated the round                                                             |
 
 ### Notes
 
-The diagnostic list is truncated at `LIMITS.diagnostics` (30 entries); the rest is not returned. The `trace` field is Typst's call trace (`from …`), which names the file the error really came from.
+The canonical value and the model-facing text both carry at most `LIMITS.diagnostics` (30) entries. The canonical value includes `diagnosticsTotal` and `diagnosticsTruncated`. The model-facing summary reports the displayed and total counts when entries are omitted. The `trace` field is Typst's call trace (`from …`), which names the file the error really came from.
 
 ### Example
 
@@ -116,7 +120,7 @@ typst_check()
 
 Renders pages of the document to PNG images so the agent can look at the layout: overfull lines, figure and table placement, page breaks, title pages, spacing.
 
-Compile errors do not catch layout problems: render the affected pages and look at them.
+Layout problems are visible only in the rendered page: overfull lines, figure and table placement, page breaks, title pages and spacing all need a look.
 
 ### Parameters
 
@@ -127,17 +131,17 @@ Compile errors do not catch layout problems: render the affected pages and look 
 
 ### Output
 
-| Field    | Type     | Meaning                                                   |
-| -------- | -------- | --------------------------------------------------------- |
-| `pages`  | int[]    | The pages that were rendered                              |
-| `total`  | int      | The total page count of the document                      |
-| `images` | object[] | One item per page, with `page` and `dataUrl` (base64 PNG) |
+| Field    | Type     | Meaning                                                                                                                    |
+| -------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `pages`  | int[]    | The pages that were rendered                                                                                               |
+| `total`  | int      | The total page count of the document                                                                                       |
+| `images` | object[] | One item per page, with `page` and `attachment` (`attachmentId`, `mediaType`, `bytes`, `width`, `height`, optional `name`) |
 
 ### Notes
 
-At most 4 pages per call (`LIMITS.renderPages`). When the document does not compile the call fails with `TYPST_COMPILE_FAILED` and the error carries the diagnostics — there is no page to render in that case.
+At most 4 pages per call (`LIMITS.renderPages`). When the document does not compile the call fails with `TYPST_COMPILE_FAILED` and the error carries the diagnostics; renderable pages exist only after a successful compile.
 
-The contents of `images` also enter the tool card's data channel; above 6 MB the card carries no images and shows the page numbers only.
+The contents of `images` also enter the tool card's data channel, but only as durable attachment references; the PNG bytes live in the attachment store, and the card reads them by reference instead of inlining a second copy.
 
 ### Example
 
@@ -215,7 +219,7 @@ typst_clear_highlights()
 
 Compiles the document with the user's Typst and writes a PDF into the workspace. Optionally a PDF standard and a page selection.
 
-The preview's own PDF is not in the workspace; this is how you produce the deliverable.
+The preview PDF stays in the plugin cache; this tool writes the deliverable into the workspace.
 
 ### Parameters
 
@@ -248,41 +252,50 @@ typst_export_pdf(path="paper.pdf", pdfStandard="a-2b")
 
 ## The panel's wire methods
 
-The panel does not read the state through the agent tools. It goes through the host service of the `typst` wire namespace (service key `typstStatus`). Every method takes a `typstScope` parameter, and the server resolves the SessionId into a workspace root through it.
+The panel reads state through the host service of the `typst` wire namespace (service key `typstStatus`). Every method takes a `typstScope` parameter, and the server resolves the SessionId into a workspace root through it.
 
-| Method         | Returns                             | Meaning                                                                                                           |
-| -------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `status`       | `TypstStateFrame`                   | The current state frame; also activates the session                                                               |
-| `setMain`      | `{ main }`                          | Choose the main file                                                                                              |
-| `watch`        | `AsyncIterable<TypstStateFrame>`    | The state stream: the first frame is the current state, every later frame follows one change                      |
-| `readPreview`  | `{ generation, seq, sha256, data }` | Read the exact retained snapshot identity (`data` rides as an attachment)                                         |
-| `locateSource` | `{ matches }`                       | The candidate source matches for a rendered text                                                                  |
-| `recheck`      | `TypstStateFrame`                   | Look typst up again and answer with the new frame                                                                 |
-| `restart`      | `TypstStateFrame`                   | Stop the watch, change the main file, rescan, restart, and answer with the new frame                              |
-| `discover`     | `{}`                                | Completely index the workspace, optionally including excluded directories; state frames carry progress and errors |
+| Method         | Returns                                   | Meaning                                                                                                           |
+| -------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `status`       | `TypstStateFrame`                         | The current state frame; also activates the session                                                               |
+| `setMain`      | `{ main }`                                | Choose the main file                                                                                              |
+| `watch`        | `AsyncIterable<TypstStateFrame>`          | The state stream: the first frame is the current state, every later frame follows one change                      |
+| `readPreview`  | `{ generation, seq, sha256, data }`       | Read the exact retained snapshot identity (`data` rides as an attachment)                                         |
+| `locateSource` | `{ matches }`                             | The candidate source matches for a rendered text                                                                  |
+| `recheck`      | `TypstStateFrame`                         | Look typst up again and answer with the new frame                                                                 |
+| `restart`      | `TypstStateFrame`                         | Stop the watch, relocate typst, rescan, restart, and answer with the new frame; the main file is unchanged        |
+| `discover`     | `{ candidates, includeExcluded, errors }` | Completely index the workspace, optionally including excluded directories; state frames carry progress and errors |
 
-`readPreview` requires `{ generation, seq, sha256 }`; expired identities return `TYPST_NOT_FOUND`. Draft append, image upload and request submission use public host client APIs without a plugin wire proxy.
+`readPreview` requires `{ generation, seq, sha256 }`; expired identities return `TYPST_NOT_FOUND`. Draft append, image upload and request submission use public host client APIs.
 
 `watch` is a stream method: its manifest signature carries the prefix `@Remote({ mode: 'stream' })` and its descriptor carries `mode: 'stream'`.
 
 ## Error codes
 
-A domain error of the plugin's own crosses the wire under exactly one code, `typst/domain`, with the stable domain code in `details.code`; consumers discriminate by `details.code`, never by `instanceof`.
+Every stable domain error code crosses the wire as its own `typst/<reason>` code, with the stable domain code also in `details.code`; consumers discriminate by `code` / `details.code`.
 
-| Error code                     | Meaning                                                             |
-| ------------------------------ | ------------------------------------------------------------------- |
-| `TYPST_MISSING`                | No typst was found in this computer's search                        |
-| `TYPST_TOO_OLD`                | The installed typst is below the supported minimum (0.12.0)         |
-| `TYPST_UNUSABLE`               | Typst exists but does not run (`--version` failed, broken install)  |
-| `TYPST_NO_MAIN`                | No main `.typ` file is chosen and none could be picked              |
-| `TYPST_NO_PREVIEW`             | The requested preview does not exist (nothing compiled yet)         |
-| `TYPST_NOT_FOUND`              | The requested snapshot, page or highlight is gone                   |
-| `TYPST_INVALID_ARGUMENT`       | An argument violates a domain constraint the schemas cannot express |
-| `TYPST_PATH_OUTSIDE_WORKSPACE` | The path resolves outside the workspace                             |
-| `TYPST_TIMEOUT`                | The compile did not settle within the caller's budget               |
-| `TYPST_WATCH_FAILED`           | `typst watch` died or could not start                               |
-| `TYPST_QUOTE_NOT_FOUND`        | The quote was not found in the rendered preview                     |
-| `TYPST_NOT_COMPOSED`           | The Typst workbench service is not composed                         |
-| `TYPST_UNEXPECTED`             | Something unexpected; the message carries the domain fact           |
+| Error code                     | Meaning                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------- |
+| `TYPST_MISSING`                | No typst was found in this computer's search                                    |
+| `TYPST_TOO_OLD`                | The installed typst is below the supported minimum (0.12.0)                     |
+| `TYPST_UNUSABLE`               | Typst exists but does not run (`--version` failed, broken install)              |
+| `TYPST_NO_MAIN`                | No main `.typ` file is chosen and none could be picked                          |
+| `TYPST_NO_PREVIEW`             | The requested preview does not exist (nothing compiled yet)                     |
+| `TYPST_NOT_FOUND`              | The requested snapshot, page or highlight is gone                               |
+| `TYPST_INVALID_ARGUMENT`       | An argument violates a domain constraint the schemas cannot express             |
+| `TYPST_PATH_OUTSIDE_WORKSPACE` | The path resolves outside the workspace                                         |
+| `TYPST_TIMEOUT`                | The compile did not settle within the caller's budget                           |
+| `TYPST_WATCH_FAILED`           | `typst watch` died or could not start                                           |
+| `TYPST_QUOTE_NOT_FOUND`        | The quote was not found in the rendered preview                                 |
+| `TYPST_NOT_COMPOSED`           | The Typst workbench service is not composed                                     |
+| `TYPST_ATTACHMENT_UNAVAILABLE` | The attachment store is not composed, so rendered pages have no destination     |
+| `TYPST_COMPILE_FAILED`         | The document does not compile; the message carries the model-facing diagnostics |
+| `TYPST_SANDBOX_READ_ONLY`      | The session policy is read-only and the export was refused                      |
+| `TYPST_SANDBOX_INVALID_ROOT`   | A declared writable root is missing, not a directory, or cannot be resolved     |
+| `TYPST_PAGE_OUT_OF_RANGE`      | The requested page is outside the compiled document                             |
+| `TYPST_MAIN_CHANGED`           | The main file changed during the operation, so the snapshot no longer matches   |
+| `TYPST_CLOCK_SKEW`             | The main file and snapshot modification times cannot be ordered                 |
+| `TYPST_INVALID_TARGET`         | A highlight, page or match target is invalid                                    |
+| `TYPST_SETTLE_FAILED`          | Settle failed rather than merely timing out                                     |
+| `TYPST_UNEXPECTED`             | Something unexpected; the message carries the domain fact                       |
 
-When `typst_render_pages` and `typst_export_pdf` fail because the document does not compile, the error's name is `TYPST_COMPILE_FAILED` and its message carries the full diagnostics.
+When `typst_render_pages` and `typst_export_pdf` fail because the document does not compile, the error's name is `TYPST_COMPILE_FAILED` and its message carries the model-facing diagnostics (at most 30 entries); the complete diagnostics stay in the canonical value.

@@ -55,17 +55,19 @@ typst_status()
 
 ### 输出
 
-| 字段       | 类型   | 说明               |
-| ---------- | ------ | ------------------ |
-| `main`     | string | 选定的主文件       |
-| `phase`    | string | 编译阶段           |
-| `errors`   | int    | 错误数             |
-| `warnings` | int    | 警告数             |
-| `summary`  | string | 编译摘要与问题清单 |
+| 字段       | 类型   | 说明                                   |
+| ---------- | ------ | -------------------------------------- |
+| `main`     | string | 选定的主文件                           |
+| `phase`    | string | 编译阶段                               |
+| `errors`   | int    | 错误数                                 |
+| `warnings` | int    | 警告数                                 |
+| `settled`  | bool   | 是否在检查预算内等到新主文件的编译结果 |
+| `reason`   | string | 等待失败时的原因，可选                 |
+| `summary`  | string | 编译摘要与问题清单                     |
 
 ### 说明
 
-路径必须落在工作区内，越界以 `TYPST_PATH_OUTSIDE_WORKSPACE` 拒绝。调用后会等待一次 settle，因此返回时摘要已经反映了新主文件的编译结果。
+路径必须落在工作区内，越界以 `TYPST_PATH_OUTSIDE_WORKSPACE` 拒绝。调用会等待新主文件的编译结果。等待超时或遇到其他等待错误时，返回 `settled: false` 和 `reason`，摘要也会说明等待失败。
 
 ### 示例
 
@@ -89,20 +91,22 @@ typst_set_main(path="paper.typ")
 
 ### 输出
 
-| 字段          | 类型     | 说明                                          |
-| ------------- | -------- | --------------------------------------------- |
-| `main`        | string   | 主文件；未选定时不出现                        |
-| `phase`       | string   | 编译阶段                                      |
-| `errors`      | int      | 错误数                                        |
-| `warnings`    | int      | 警告数                                        |
-| `pages`       | int      | 预览页数；尚无成功编译时不出现                |
-| `durationMs`  | int      | 编译耗时                                      |
-| `summary`     | string   | 一行编译摘要                                  |
-| `diagnostics` | object[] | 完整的诊断视图：位置、源码行、`hint:`、调用链 |
+| 字段                   | 类型     | 说明                                                      |
+| ---------------------- | -------- | --------------------------------------------------------- |
+| `main`                 | string   | 主文件；未选定时不出现                                    |
+| `phase`                | string   | 编译阶段                                                  |
+| `errors`               | int      | 错误数                                                    |
+| `warnings`             | int      | 警告数                                                    |
+| `pages`                | int      | 预览页数；尚无成功编译时不出现                            |
+| `durationMs`           | int      | 编译耗时                                                  |
+| `summary`              | string   | 一行编译摘要                                              |
+| `diagnostics`          | object[] | 本轮诊断视图（最多 30 条）：位置、源码行、`hint:`、调用链 |
+| `diagnosticsTotal`     | int      | 本轮诊断总数（截断前）                                    |
+| `diagnosticsTruncated` | bool     | 是否因超过上限而截断                                      |
 
 ### 说明
 
-诊断列表按 `LIMITS.diagnostics`（30 条）截断，超出部分不返回。`trace` 字段是 Typst 的调用链（`from …`），指出错误真正来自哪个文件。
+canonical 值与模型文本最多包含 `LIMITS.diagnostics`（30 条）诊断。canonical 值提供 `diagnosticsTotal` 和 `diagnosticsTruncated`。发生截断时，模型摘要会报告显示条数与总数。`trace` 字段是 Typst 的调用链（`from …`），指出错误来自哪个文件。
 
 ### 示例
 
@@ -116,7 +120,7 @@ typst_check()
 
 把文档的若干页渲染成 PNG 图片，供 Agent 看排版：溢出的行、图片与表格的位置、分页、标题页、间距。
 
-编译错误抓不到排版问题：遇到这类问题就渲染受影响的页并看图。
+排版问题只在渲染页上可见：溢出的行、图片与表格的位置、分页、标题页、间距都需要看图确认。
 
 ### 参数
 
@@ -127,17 +131,17 @@ typst_check()
 
 ### 输出
 
-| 字段     | 类型     | 说明                                     |
-| -------- | -------- | ---------------------------------------- |
-| `pages`  | int[]    | 实际渲染的页码                           |
-| `total`  | int      | 文档总页数                               |
-| `images` | object[] | 每项含 `page` 与 `dataUrl`（base64 PNG） |
+| 字段     | 类型     | 说明                                                                                                  |
+| -------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| `pages`  | int[]    | 实际渲染的页码                                                                                        |
+| `total`  | int      | 文档总页数                                                                                            |
+| `images` | object[] | 每项含 `page` 与 `attachment`（`attachmentId`、`mediaType`、`bytes`、`width`、`height`、可选 `name`） |
 
 ### 说明
 
-每次调用至多 4 页（`LIMITS.renderPages`）。文档编译不通过时以 `TYPST_COMPILE_FAILED` 失败，并在错误里附上诊断——此时没有页面可渲染。
+每次调用至多 4 页（`LIMITS.renderPages`）。文档编译不通过时以 `TYPST_COMPILE_FAILED` 失败，并在错误里附上诊断；可渲染的页面只在编译成功后存在。
 
-`images` 的内容同时进入工具卡的数据通道；超过 6 MB 时工具卡不携带图片，只显示页码。
+`images` 的内容同时进入工具卡的数据通道，但只带持久附件引用；PNG 字节保存在 attachment store，工具卡按引用读取，避免重复内联。
 
 ### 示例
 
@@ -215,7 +219,7 @@ typst_clear_highlights()
 
 用用户的 Typst 编译文档，把 PDF 写进工作区。可选 PDF 标准与页选择。
 
-预览自己的 PDF 不在工作区里；这个工具才是产出物的方式。
+预览 PDF 留在插件缓存里；这个工具把成品写进工作区。
 
 ### 参数
 
@@ -248,26 +252,26 @@ typst_export_pdf(path="paper.pdf", pdfStandard="a-2b")
 
 ## 面板 wire 方法
 
-面板不通过 Agent 工具读状态，而是走 `typst` wire 命名空间的 host 服务（服务键 `typstStatus`）。每个方法都带 `typstScope` 参数，服务端据此把 SessionId 解析为工作区根。
+面板通过 `typst` wire 命名空间的 host 服务（服务键 `typstStatus`）读取状态。每个方法都带 `typstScope` 参数，服务端据此把 SessionId 解析为工作区根。
 
-| 方法           | 返回                                | 说明                                                             |
-| -------------- | ----------------------------------- | ---------------------------------------------------------------- |
-| `status`       | `TypstStateFrame`                   | 当前状态帧，同时激活会话                                         |
-| `setMain`      | `{ main }`                          | 选定主文件                                                       |
-| `watch`        | `AsyncIterable<TypstStateFrame>`    | 状态流：首帧是当前状态，之后每帧一次变化                         |
-| `readPreview`  | `{ generation, seq, sha256, data }` | 精确读取请求身份的保留快照（`data` 走附件通道）                  |
-| `locateSource` | `{ matches }`                       | 渲染文字到源码的候选匹配                                         |
-| `recheck`      | `TypstStateFrame`                   | 重新定位 typst 后返回新状态帧                                    |
-| `restart`      | `TypstStateFrame`                   | 停 watch、换主文件、重扫、重启后返回新帧                         |
-| `discover`     | `{}`                                | 完整索引工作区，可显式包含默认排除目录；进度与错误在状态流中显示 |
+| 方法           | 返回                                      | 说明                                                             |
+| -------------- | ----------------------------------------- | ---------------------------------------------------------------- |
+| `status`       | `TypstStateFrame`                         | 当前状态帧，同时激活会话                                         |
+| `setMain`      | `{ main }`                                | 选定主文件                                                       |
+| `watch`        | `AsyncIterable<TypstStateFrame>`          | 状态流：首帧是当前状态，之后每帧一次变化                         |
+| `readPreview`  | `{ generation, seq, sha256, data }`       | 精确读取请求身份的保留快照（`data` 走附件通道）                  |
+| `locateSource` | `{ matches }`                             | 渲染文字到源码的候选匹配                                         |
+| `recheck`      | `TypstStateFrame`                         | 重新定位 typst 后返回新状态帧                                    |
+| `restart`      | `TypstStateFrame`                         | 停 watch、重新定位 typst、重扫、重启后返回新帧；不换主文件       |
+| `discover`     | `{ candidates, includeExcluded, errors }` | 完整索引工作区，可显式包含默认排除目录；进度与错误在状态流中显示 |
 
-`readPreview` 必须传入 `{ generation, seq, sha256 }`，过期身份返回 `TYPST_NOT_FOUND`。文字追加、图片上传与请求提交通过宿主公开客户端 API 完成，不再由插件 wire 代理。
+`readPreview` 必须传入 `{ generation, seq, sha256 }`，过期身份返回 `TYPST_NOT_FOUND`。文字追加、图片上传与请求提交通过宿主公开客户端 API 完成。
 
 `watch` 是流方法：manifest 的 signature 前缀 `@Remote({ mode: 'stream' })`，descriptor 带 `mode: 'stream'`。
 
 ## 错误码
 
-插件自有域的错误在 wire 上只有一个码 `typst/domain`，稳定域码放在 `details.code`；消费方按 `details.code` 判别，而不是按 `instanceof`。
+插件自有域的每个稳定错误码在 wire 上各有一个 `typst/<reason>` 码，稳定域码同时放在 `details.code`；消费方按 `code` / `details.code` 判别。
 
 | 错误码                         | 说明                                               |
 | ------------------------------ | -------------------------------------------------- |
@@ -283,6 +287,15 @@ typst_export_pdf(path="paper.pdf", pdfStandard="a-2b")
 | `TYPST_WATCH_FAILED`           | `typst watch` 退出或无法启动                       |
 | `TYPST_QUOTE_NOT_FOUND`        | 引文在渲染预览中找不到                             |
 | `TYPST_NOT_COMPOSED`           | Typst 工作台服务未组合                             |
+| `TYPST_ATTACHMENT_UNAVAILABLE` | attachment store 未组合，渲染出的页面没有落点      |
+| `TYPST_COMPILE_FAILED`         | 文档编译不通过，消息里附模型侧诊断                 |
+| `TYPST_SANDBOX_READ_ONLY`      | 会话策略是 read-only，导出被拒绝                   |
+| `TYPST_SANDBOX_INVALID_ROOT`   | 策略声明的可写根不存在、不是目录或解析失败         |
+| `TYPST_PAGE_OUT_OF_RANGE`      | 请求页码超出编译后的文档                           |
+| `TYPST_MAIN_CHANGED`           | 操作期间主文件已改变，快照不再匹配                 |
+| `TYPST_CLOCK_SKEW`             | 主文件与快照的修改时间关系无法判定                 |
+| `TYPST_INVALID_TARGET`         | 高亮、页码或匹配目标不合法                         |
+| `TYPST_SETTLE_FAILED`          | settle 等待失败，不是普通的编译未完成              |
 | `TYPST_UNEXPECTED`             | 未预期的情况，消息里带着领域事实                   |
 
-`typst_render_pages` 与 `typst_export_pdf` 在编译不通过时抛出的错误名为 `TYPST_COMPILE_FAILED`，消息里附上完整诊断。
+`typst_render_pages` 与 `typst_export_pdf` 在编译不通过时抛出的错误名为 `TYPST_COMPILE_FAILED`，消息里附上模型侧诊断文本（最多 30 条）；canonical 值带同样的上限与总数标记。

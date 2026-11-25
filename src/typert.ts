@@ -6,9 +6,11 @@
  * repository is a standalone checkout with neither. The registry documents
  * `ctx.typert.register()` as the path for hand-written wire schemas. No
  * `./typert` export is declared on purpose: the production Loader row is the
- * bare package name `dsh-typst`, and registering the same `package#face`
- * twice fails with "already registered". The strict registry is the Host
- * Gateway's preferred resolution path and needs no `@Remote` markers.
+ * npm package `dsh-typst-plugin`, and registering the same `package#face`
+ * twice fails with "already registered". The wire namespace remains `typst`
+ * (the Cordis service key / `TYPST_REMOTE_NAMESPACE`), independent of the
+ * package identity. The strict registry is the Host Gateway's preferred
+ * resolution path and needs no `@Remote` markers.
  *
  * Invocations come from `status-codec.ts` (host zod factories); the client
  * half mounts its own codecs in `client/status-codec.ts`. Both arms
@@ -19,12 +21,12 @@
  */
 
 import type { TypertContribution } from "@deepseek-ai/dsh-typert-registry/types";
-import { TYPST_STATUS_SERVICE_KEY } from "./constants.js";
+import { TYPST_REMOTE_PACKAGE, TYPST_STATUS_SERVICE_KEY } from "./constants.js";
 import { TYPST_INVOCATIONS_HOST } from "./status-codec.js";
 
 /** The typst namespace's host manifest (strict codecs owned by this half). */
 export const TYPERT_MANIFEST: TypertContribution = {
-  package: "typst",
+  package: TYPST_REMOTE_PACKAGE,
   face: "host",
   schemas: [],
   model: {
@@ -82,10 +84,46 @@ export const TYPERT_MANIFEST: TypertContribution = {
             kind: "method",
             name: "discover",
             signature:
-              "discover(typstScope: TypstScope, includeExcluded: boolean, signal: AbortSignal): Promise<object>",
+              "discover(typstScope: TypstScope, includeExcluded: boolean, signal: AbortSignal): Promise<DiscoveryView>",
           },
         ],
-        types: [],
+        /**
+         * Declarations for every named business type the member signatures
+         * reference. The reflection model requires these to be present; the
+         * codecs in `invocations` remain the wire authority.
+         */
+        types: [
+          {
+            name: "TypstScope",
+            declaration:
+              "export interface TypstScope { readonly sessionId: SessionId; readonly workspaceRoot: string }",
+          },
+          {
+            name: "TypstStateFrame",
+            declaration:
+              "export interface TypstStateFrame { version: number; generation: number; previewError: string | null; discovery: object; toolchain: object; workspace: string; workspaceRoot: string; main: string | null; candidates: string[]; fragments: string[]; status: object; diagnostics: object[]; diagnosticsTotal: number; diagnosticsTruncated: boolean; snapshot: object | null; highlights: object[]; view: object; viewSeq: number; setup: object }",
+          },
+          {
+            name: "PreviewIdentity",
+            declaration:
+              "export interface PreviewIdentity { generation: number; seq: number; sha256: string }",
+          },
+          {
+            name: "PreviewBytes",
+            declaration:
+              "export interface PreviewBytes extends PreviewIdentity { data: Uint8Array<ArrayBuffer> }",
+          },
+          {
+            name: "SourceMatch",
+            declaration:
+              "export interface SourceMatch { file: string; line: number; column: number; endLine: number; excerpt: string; score: number }",
+          },
+          {
+            name: "DiscoveryView",
+            declaration:
+              "export interface DiscoveryView { candidates: number; includeExcluded: boolean; errors: string[] }",
+          },
+        ],
       },
     ],
     events: [],

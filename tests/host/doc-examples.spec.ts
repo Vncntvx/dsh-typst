@@ -9,58 +9,24 @@
  * @module tests/host/doc-examples
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
-import { registerTypstTools } from "../../src/tools/registration.js";
+import { registeredTools } from "../tools/helpers/tool-registry.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** The documents whose examples are checked. */
+/** Every document whose examples are checked; new pages enter automatically. */
 const DOC_FILES = [
   "README.md",
   "README.en.md",
-  "docs/index.md",
-  "docs/index.en.md",
-  "docs/product-model.md",
-  "docs/product-model.en.md",
-  "docs/tools.md",
-  "docs/tools.en.md",
-  "docs/features.md",
-  "docs/features.en.md",
-  "docs/getting-started.md",
-  "docs/getting-started.en.md",
-  "docs/architecture.md",
-  "docs/architecture.en.md",
-  "docs/configuration.md",
-  "docs/configuration.en.md",
-  "docs/troubleshooting.md",
-  "docs/troubleshooting.en.md",
+  ...readdirSync(join(root, "docs"))
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => `docs/${name}`)
+    .sort(),
 ];
-
-/**
- * The registered tools, captured without running any of them.
- *
- * `registerTypstTools` registers one effect per tool; a stub context that
- * runs each effect immediately captures the definitions and nothing else.
- * @returns every registered tool definition, keyed by name.
- */
-function registeredTools(): Map<string, ToolDefinition> {
-  const captured: ToolDefinition[] = [];
-  const ctx = {
-    effect: (fn: () => unknown) => fn(),
-    tools: {
-      register: (definition: ToolDefinition) => {
-        captured.push(definition);
-        return () => undefined;
-      },
-    },
-  };
-  registerTypstTools(ctx as never, {} as never);
-  return new Map(captured.map((definition) => [definition.name, definition]));
-}
 
 /**
  * One documented call: the tool's name and its named arguments.
